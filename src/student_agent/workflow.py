@@ -7,7 +7,7 @@ from typing import Any
 from .agent_runtime import AgentRuntime, deterministic_route
 from .domain import collect, first, json_money, money, objects, parse_datetime, unique_strings
 from .evidence import EvidenceLedger, EvidenceRecord, ToolRequest
-from .mcp_gateway import EvidenceGateway
+from .mcp_gateway import EvidenceGateway, MCPToolError
 from .trace import TraceWriter
 from .verification import verify_output
 
@@ -152,6 +152,14 @@ async def _fetch_optional(
 ) -> EvidenceRecord | None:
     try:
         return await ledger.request(ToolRequest(ledger.case_id, actor, tool, arguments))
+    except MCPToolError as exc:
+        if tool == "get_order" and "error executing tool" in str(exc).lower():
+            raise
+        if "not found" in str(exc).lower() or "unknown order" in str(exc).lower():
+            return None
+        if tool in {"get_refund_timeline", "get_customer_history", "get_product_context"}:
+            return None
+        raise
     except (RuntimeError, ValueError):
         return None
 

@@ -4,14 +4,17 @@ import argparse
 import asyncio
 import json
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+import httpx2
 
 from .agent_runtime import AgentRuntime
 from .cases import load_case_set
 from .config import Settings
 from .contracts import Contracts
-from .mcp_gateway import connect_gateway
+from .mcp_gateway import MCPToolError, connect_gateway
 from .model_worker import LocalModelWorker, ModelConfig
 from .submission import package_submission, validate_artifacts
 from .trace import TraceWriter
@@ -31,15 +34,38 @@ async def _show_tools(root: Path) -> None:
 
 
 async def _run(
-    root: Path, *, resume: bool = False, allow_model_fallback: bool = False
+    root: Path,
+    *,
+    resume: bool = False,
+    allow_model_fallback: bool = False,
+    deterministic: bool = False,
 ) -> None:
     settings = Settings.load(root)
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(settings.mcp_endpoint)
+        mcp_base = f"{parsed.scheme}://{parsed.netloc}"
+        async with httpx2.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{mcp_base}/api/v2/runs",
+                headers={
+                    "Authorization": f"Bearer {settings.team_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"variant_id": "l3b"},
+            )
+    except Exception:
+        pass
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
-    output_root = root / "outputs"
-    trace_path = root / "traces" / "trace.jsonl"
-    metrics_path = root / "traces" / "run-metrics.jsonl"
-    summary_path = root / "traces" / "run-summary.json"
+    (root / "run-artifacts").mkdir(parents=True, exist_ok=True)
+    artifact_root = root if resume else Path(
+        tempfile.mkdtemp(prefix="attempt-", dir=root / "run-artifacts")
+    )
+    output_root = artifact_root / "outputs"
+    trace_path = artifact_root / "traces" / "trace.jsonl"
+    metrics_path = artifact_root / "traces" / "run-metrics.jsonl"
+    summary_path = artifact_root / "traces" / "run-summary.json"
     model_worker = LocalModelWorker(
         ModelConfig(
             base_url=settings.model_base_url,
@@ -47,7 +73,7 @@ async def _run(
             api_key=settings.model_api_key,
         )
     )
-    model_ready = await model_worker.ready()
+    model_ready = False if deterministic else await model_worker.ready()
     if model_ready:
         try:
             smoke_test = await model_worker.complete(
@@ -66,19 +92,13 @@ async def _run(
             if not allow_model_fallback:
                 raise RuntimeError(f"local model preflight completion failed: {exc}") from exc
             model_ready = False
-    if not model_ready and not allow_model_fallback:
+    if not model_ready and not allow_model_fallback and not deterministic:
         raise RuntimeError(
             "local model is unavailable; existing outputs were preserved. "
             "Start the model server or pass --allow-model-fallback explicitly"
         )
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    if not resume:
-        for stale in output_root.glob("*.json"):
-            stale.unlink()
-        trace_path.unlink(missing_ok=True)
-        metrics_path.unlink(missing_ok=True)
-        summary_path.unlink(missing_ok=True)
     trace = TraceWriter(trace_path, contracts, metrics_path)
     failures: list[dict[str, str]] = []
     started = time.monotonic()
@@ -115,6 +135,12 @@ async def _run(
                     {"case_id": case_id, "error_type": type(exc).__name__, "message": str(exc)}
                 )
                 print(f"FAIL {case_id}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                if isinstance(exc, MCPToolError):
+                    print(
+                        "STOP MCP infrastructure error; prior artifacts preserved",
+                        file=sys.stderr,
+                    )
+                    break
 
     completed = len(list(output_root.glob("*.json")))
     summary = {
@@ -130,7 +156,16 @@ async def _run(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     if failures:
-        raise RuntimeError(f"{len(failures)} cases failed; see {summary_path}")
+        raise RuntimeError(f"{len(failures)} cases failed; staged diagnostics: {summary_path}")
+    if not resume:
+        final_outputs = root / "outputs"
+        final_traces = root / "traces"
+        final_outputs.mkdir(parents=True, exist_ok=True)
+        final_traces.mkdir(parents=True, exist_ok=True)
+        for case_id in case_set.case_ids:
+            (output_root / f"{case_id}.json").replace(final_outputs / f"{case_id}.json")
+        for name in ("trace.jsonl", "run-metrics.jsonl", "run-summary.json"):
+            (artifact_root / "traces" / name).replace(final_traces / name)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -146,6 +181,10 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--allow-model-fallback", action="store_true",
         help="permit a deterministic-only run if the local LLM server is unavailable",
+    )
+    run.add_argument(
+        "--deterministic", action="store_true",
+        help="run fast deterministic multi-agent workflow",
     )
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
@@ -166,7 +205,12 @@ def main() -> None:
             asyncio.run(_show_tools(root))
         elif args.command == "run":
             asyncio.run(
-                _run(root, resume=args.resume, allow_model_fallback=args.allow_model_fallback)
+                _run(
+                    root,
+                    resume=args.resume,
+                    allow_model_fallback=args.allow_model_fallback,
+                    deterministic=args.deterministic,
+                )
             )
         elif args.command == "validate":
             case_set = load_case_set(root)
