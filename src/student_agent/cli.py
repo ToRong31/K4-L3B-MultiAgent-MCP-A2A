@@ -35,16 +35,22 @@ async def _run(root: Path) -> None:
     trace_path = root / "traces" / "trace.jsonl"
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in output_root.glob("*.json"):
+    # Only remove temporary leftover files
+    for stale in output_root.glob("*.tmp"):
         stale.unlink()
-    trace_path.unlink(missing_ok=True)
     trace = TraceWriter(trace_path, contracts)
 
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
-        for case_id in case_set.case_ids:
+        total_cases = len(case_set.case_ids)
+        for idx, case_id in enumerate(case_set.case_ids, start=1):
+            target = output_root / f"{case_id}.json"
+            if target.exists():
+                print(f"[{idx:3d}/{total_cases}] {case_id} already exists, skipping.", flush=True)
+                continue
+            print(f"[{idx:3d}/{total_cases}] Solving {case_id}...", end=" ", flush=True)
             case = case_set.cases[case_id]
             trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
             output = await solve_case(case, gateway, trace)
@@ -58,6 +64,9 @@ async def _run(root: Path) -> None:
             )
             temporary.replace(target)
             trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+            issue = output.get("assessment", {}).get("primary_issue", "done")
+            conf = output.get("assessment", {}).get("confidence", 0)
+            print(f"OK ({issue}, conf={conf})", flush=True)
 
 
 def parser() -> argparse.ArgumentParser:
