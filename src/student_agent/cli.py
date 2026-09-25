@@ -27,7 +27,7 @@ async def _show_tools(root: Path) -> None:
             print(tool)
 
 
-async def _run(root: Path) -> None:
+async def _run(root: Path, fresh: bool = False) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
@@ -35,6 +35,12 @@ async def _run(root: Path) -> None:
     trace_path = root / "traces" / "trace.jsonl"
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if fresh:
+        for stale in output_root.glob("*.json"):
+            stale.unlink()
+        trace_path.unlink(missing_ok=True)
+
     # Only remove temporary leftover files
     for stale in output_root.glob("*.tmp"):
         stale.unlink()
@@ -75,7 +81,8 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
     commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
-    commands.add_parser("run", help="run the implemented workflow for all cases")
+    run_cmd = commands.add_parser("run", help="run the implemented workflow for all cases")
+    run_cmd.add_argument("--fresh", action="store_true", help="wipe existing outputs/traces and run from scratch")
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
     package.add_argument("--output", default="dist/submission.zip")
@@ -95,7 +102,7 @@ def main() -> None:
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
         elif args.command == "run":
-            asyncio.run(_run(root))
+            asyncio.run(_run(root, fresh=args.fresh))
         elif args.command == "validate":
             case_set = load_case_set(root)
             contracts = Contracts(root / "contracts" / "schemas")

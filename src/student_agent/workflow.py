@@ -14,21 +14,10 @@ from .agents import (
     run_shipment_agent,
     run_verifier_agent,
 )
-from .llm import LLMClient
 from .mcp_gateway import EvidenceGateway
 from .trace import TraceWriter
 
 logger = logging.getLogger(__name__)
-
-# Module-level singleton so LLM client is reused across cases
-_llm_client: LLMClient | None = None
-
-
-def _get_llm() -> LLMClient:
-    global _llm_client
-    if _llm_client is None:
-        _llm_client = LLMClient()
-    return _llm_client
 
 
 async def solve_case(
@@ -41,11 +30,10 @@ async def solve_case(
       2. Order Agent              → collect order/items/sellers
       3. Shipment Agent           → analyze delivery timeline
       4. Payment Agent            → reconcile payments/refunds
-      5. Policy Agent (LLM)       → determine primary issue, responsibility, financials
+      5. Policy Agent             → deterministic issue, responsibility, financials
       6. Verifier Agent           → cross-field consistency + confidence calibration
     """
     case_id = case["case_id"]
-    llm = _get_llm()
     cache = EvidenceCache()
 
     # ── Phase 1: Entity Resolution ──
@@ -54,25 +42,47 @@ async def solve_case(
 
     # ── Phase 2: Order & Product Investigation ──
     order_result = await run_order_agent(case, gateway, trace, cache, resolved_order_ids)
-    entities = order_result.get("affected_entities", {
-        "order_ids": [], "item_ids": [], "seller_ids": [],
-        "payment_references": [], "shipment_ids": [],
-    })
+    entities = order_result.get(
+        "affected_entities",
+        {
+            "order_ids": [],
+            "item_ids": [],
+            "seller_ids": [],
+            "payment_references": [],
+            "shipment_ids": [],
+        },
+    )
 
     # ── Phase 3: Shipment Analysis ──
     shipment_result = await run_shipment_agent(
-        case, gateway, trace, cache, resolved_order_ids, entities,
+        case,
+        gateway,
+        trace,
+        cache,
+        resolved_order_ids,
+        entities,
     )
 
     # ── Phase 4: Payment Analysis ──
     payment_result = await run_payment_agent(
-        case, gateway, trace, cache, resolved_order_ids, entities,
+        case,
+        gateway,
+        trace,
+        cache,
+        resolved_order_ids,
+        entities,
     )
 
-    # ── Phase 5: Policy Decision (LLM-powered) ──
+    # ── Phase 5: Deterministic policy decision ──
     policy_result = await run_policy_agent(
-        case, gateway, trace, cache, llm,
-        entity_result, shipment_result, payment_result, entities,
+        case,
+        gateway,
+        trace,
+        cache,
+        entity_result,
+        shipment_result,
+        payment_result,
+        entities,
     )
 
     # ── Assemble Output ──
