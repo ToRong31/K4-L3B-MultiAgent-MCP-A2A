@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from .mcp_gateway import connect_gateway
 from .submission import package_submission, validate_artifacts
 from .trace import TraceWriter
 from .workflow import solve_case
+from .workspace import prepare_workspace
 
 
 def _root(value: str) -> Path:
@@ -29,35 +31,50 @@ async def _show_tools(root: Path) -> None:
 
 async def _run(root: Path) -> None:
     settings = Settings.load(root)
+    if not os.getenv("L3B_RUN_ID", "").strip():
+        raise RuntimeError(
+            "L3B_RUN_ID is missing; set the same value in .env for day09 run "
+            "and all five A2A servers"
+        )
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
     output_root = root / "outputs"
     trace_path = root / "traces" / "trace.jsonl"
+    existing = [p for p in output_root.glob("*.json")] if output_root.exists() else []
+    if existing or trace_path.exists():
+        raise RuntimeError(
+            "run would overwrite existing outputs or trace; use a clean trial directory"
+        )
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in output_root.glob("*.json"):
-        stale.unlink()
-    trace_path.unlink(missing_ok=True)
     trace = TraceWriter(trace_path, contracts)
 
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
-        for case_id in case_set.case_ids:
-            case = case_set.cases[case_id]
-            trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
-            output = await solve_case(case, gateway, trace)
-            contracts.validate_output(output, f"outputs/{case_id}.json")
-            if output.get("case_id") != case_id:
-                raise ValueError(f"solver returned a mismatched case_id for {case_id}")
-            target = output_root / f"{case_id}.json"
-            temporary = target.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
-            temporary.replace(target)
-            trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+        concurrency = int(os.getenv("L3B_CASE_CONCURRENCY", "1"))
+        if not 1 <= concurrency <= 8:
+            raise ValueError("L3B_CASE_CONCURRENCY must be between 1 and 8")
+        limit = asyncio.Semaphore(concurrency)
+
+        async def run_one(case_id: str) -> None:
+            async with limit:
+                case = case_set.cases[case_id]
+                trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
+                output = await solve_case(case, gateway, trace)
+                contracts.validate_output(output, f"outputs/{case_id}.json")
+                if output.get("case_id") != case_id:
+                    raise ValueError(f"solver returned a mismatched case_id for {case_id}")
+                target = output_root / f"{case_id}.json"
+                temporary = target.with_suffix(".json.tmp")
+                temporary.write_text(
+                    json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+                temporary.replace(target)
+                trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+
+        await asyncio.gather(*(run_one(case_id) for case_id in case_set.case_ids))
 
 
 def parser() -> argparse.ArgumentParser:
@@ -66,6 +83,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
     commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
+    commands.add_parser("prepare-workspace", help="prepare server session and print workspace JSON")
     commands.add_parser("run", help="run the implemented workflow for all cases")
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
@@ -85,6 +103,8 @@ def main() -> None:
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
+        elif args.command == "prepare-workspace":
+            print(json.dumps(prepare_workspace(Settings.load(root), load_case_set(root))))
         elif args.command == "run":
             asyncio.run(_run(root))
         elif args.command == "validate":
