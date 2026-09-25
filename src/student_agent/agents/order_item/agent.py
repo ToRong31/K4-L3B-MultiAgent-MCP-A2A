@@ -102,6 +102,40 @@ class OrderItemAgent(Specialist):
                             refs,
                         )
                     )
+                if not entities["order_ids"]:
+                    continue
+                if (
+                    (work.input.get("case") or {})
+                    .get("investigation_scope", {})
+                    .get("include_product_context", False)
+                ):
+                    product = await fetch(self, work, "get_product_context", order_id=order_id)
+                    facts.append(
+                        fact(
+                            "product_context",
+                            {"order_id": order_id, "data": product.get("data")},
+                            [product["evidence_ref"]],
+                        )
+                    )
+                topics = {
+                    str(claim.get("topic"))
+                    for claim in (work.input.get("case") or {})
+                    .get("customer_request", {})
+                    .get("claims", [])
+                    if isinstance(claim, dict)
+                }
+                if entities["seller_ids"] and topics & {
+                    "late_delivery_seller",
+                    "unavailable_order_paid",
+                }:
+                    sellers = await fetch(self, work, "get_sellers", order_id=order_id)
+                    facts.append(
+                        fact(
+                            "seller_context",
+                            {"order_id": order_id, "data": sellers.get("data")},
+                            [sellers["evidence_ref"]],
+                        )
+                    )
         except Exception as exc:
             return finding(work, self.name, "failed", facts, [f"Order MCP error: {exc}"])
         return finding(work, self.name, "completed", facts)

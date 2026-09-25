@@ -290,8 +290,9 @@ class PaymentAgent(Specialist):
         questions = []
         try:
             for order_id in candidates:
+                payment = await fetch(self, work, "get_order_payments", order_id=order_id)
                 timeline = await fetch(self, work, "get_payment_timeline", order_id=order_id)
-                refs = [timeline["evidence_ref"]]
+                refs = [payment["evidence_ref"], timeline["evidence_ref"]]
                 snapshot = work.input.get("snapshot")
                 if isinstance(snapshot, dict) and snapshot.get("order_id") == order_id:
                     refs.append(snapshot["evidence_ref"])
@@ -311,7 +312,7 @@ class PaymentAgent(Specialist):
                 if refund is not None:
                     refs.append(refund["evidence_ref"])
                 analysis, detail = analyze_payment(
-                    timeline.get("data"), timeline.get("data"),
+                    payment.get("data"), timeline.get("data"),
                     refund.get("data") if refund is not None else None,
                     snapshot,
                     claim_topics,

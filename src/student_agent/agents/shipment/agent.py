@@ -143,16 +143,12 @@ class ShipmentAgent(Specialist):
                     .get("claims", [])
                     if isinstance(claim, dict)
                 }
-                shipment_claim = not topics or bool(
+                shipment_claim = bool(
                     topics & {"late_delivery_seller", "late_delivery_logistics"}
                 )
-                if shipment_claim:
-                    response = await fetch(self, work, "get_shipment_summary", order_id=order_id)
-                    data = response.get("data")
-                    refs = [response["evidence_ref"]]
-                else:
-                    data = {}
-                    refs = []
+                response = await fetch(self, work, "get_shipment_summary", order_id=order_id)
+                data = response.get("data")
+                refs = [response["evidence_ref"]]
                 if isinstance(snapshot, dict) and (
                     snapshot.get("order_id") == order_id
                     and isinstance(snapshot.get("order"), dict)
