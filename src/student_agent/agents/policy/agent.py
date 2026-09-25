@@ -226,6 +226,7 @@ def analyze_policy(
     if case_status not in {"action_required", "no_action", "needs_investigation"}:
         questions.append("Policy rule has no valid case_status")
     else:
+        confidence = 0.8 if case_status == "needs_investigation" else 0.9
         facts.append(
             fact(
                 "assessment",
@@ -233,7 +234,7 @@ def analyze_policy(
                     "primary_issue": issue,
                     "secondary_issues": sorted(issues - {issue})[:10],
                     "case_status": case_status,
-                    "confidence": 0.8,
+                    "confidence": confidence,
                 },
                 refs,
             )
@@ -241,6 +242,29 @@ def analyze_policy(
     cause = rule.get("cause_code")
     parties = rule.get("responsible_parties")
     if isinstance(parties, list):
+        parties = [dict(party) for party in parties if isinstance(party, dict)]
+        if issue == "late_delivery_seller":
+            grounded = [
+                seller_id
+                for data, _ in parts.get("shipment_analysis", [])
+                for seller_id in data.get("late_seller_ids", [])
+                if isinstance(seller_id, str)
+            ]
+            if grounded:
+                for party in parties:
+                    if party.get("party_type") == "seller":
+                        party["party_id"] = grounded[0]
+        if issue == "unavailable_order_paid":
+            grounded = [
+                seller_id
+                for data, _ in parts.get("affected_entities", [])
+                for seller_id in data.get("seller_ids", [])
+                if isinstance(seller_id, str)
+            ]
+            if grounded:
+                for party in parties:
+                    if party.get("party_type") == "seller":
+                        party["party_id"] = grounded[0]
         facts.append(
             fact(
                 "root_cause_analysis",
@@ -282,6 +306,42 @@ def analyze_policy(
             )
     else:
         questions.append("Policy rule lacks an explicit refund amount or rule")
+    claim_items = []
+    payment_total = next(
+        (
+            money(data.get("captured_total_brl"))
+            for data, _ in parts.get("payment_analysis", [])
+            if money(data.get("captured_total_brl")) is not None
+        ),
+        None,
+    )
+    for claim in (case or {}).get("customer_request", {}).get("claims", []):
+        if not isinstance(claim, dict) or not isinstance(claim.get("claim_id"), str):
+            continue
+        topic = claim.get("topic")
+        if topic == "requested_full_refund":
+            if case_status == "needs_investigation" or amount is None or payment_total is None:
+                verdict = "insufficient_evidence"
+            elif amount == 0:
+                verdict = "unsupported"
+            elif amount >= payment_total:
+                verdict = "supported"
+            else:
+                verdict = "partially_supported"
+        elif issue == "insufficient_evidence":
+            verdict = "insufficient_evidence"
+        else:
+            verdict = "supported" if topic == issue else "unsupported"
+        claim_items.append(
+            {
+                "claim_id": claim["claim_id"],
+                "verdict": verdict,
+                "confidence": 0.8 if verdict == "insufficient_evidence" else 0.9,
+                "evidence_refs": refs,
+            }
+        )
+    if claim_items:
+        facts.append(fact("claim_assessments", {"items": claim_items}, refs))
     return facts, questions
 
 

@@ -135,32 +135,69 @@ class ShipmentAgent(Specialist):
         facts = []
         try:
             for order_id in candidates:
-                response = await fetch(self, work, "get_shipment_summary", order_id=order_id)
-                data = response.get("data")
-                refs = [response["evidence_ref"]]
                 snapshot = work.input.get("snapshot")
-                if isinstance(data, dict) and isinstance(snapshot, dict) and (
+                topics = {
+                    str(claim.get("topic"))
+                    for claim in (work.input.get("case") or {})
+                    .get("customer_request", {})
+                    .get("claims", [])
+                    if isinstance(claim, dict)
+                }
+                shipment_claim = not topics or bool(
+                    topics & {"late_delivery_seller", "late_delivery_logistics"}
+                )
+                if shipment_claim:
+                    response = await fetch(self, work, "get_shipment_summary", order_id=order_id)
+                    data = response.get("data")
+                    refs = [response["evidence_ref"]]
+                else:
+                    data = {}
+                    refs = []
+                if isinstance(snapshot, dict) and (
                     snapshot.get("order_id") == order_id
                     and isinstance(snapshot.get("order"), dict)
                 ):
                     selected = snapshot["order"]
-                    data = {
-                        **data,
-                        "delivered_carrier_at": selected.get("order_delivered_carrier_date"),
-                        "delivered_customer_at": selected.get("order_delivered_customer_date"),
-                        "estimated_delivery_at": selected.get("order_estimated_delivery_date"),
-                        "shipping_limits": [
-                            row for row in data.get("shipping_limits", [])
-                            if isinstance(row, dict)
-                            and in_snapshot(
-                                field(row, "shipping_limit_at", "shipping_limit_date"), snapshot
-                            )
-                        ],
-                        "events": [
-                            row for row in data.get("events", [])
-                            if isinstance(row, dict) and in_snapshot(row.get("event_at"), snapshot)
-                        ],
-                    }
+                    if shipment_claim:
+                        data = {
+                            **data,
+                            "delivered_carrier_at": selected.get("order_delivered_carrier_date"),
+                            "delivered_customer_at": selected.get("order_delivered_customer_date"),
+                            "estimated_delivery_at": selected.get("order_estimated_delivery_date"),
+                            "shipping_limits": [
+                                row for row in data.get("shipping_limits", [])
+                                if isinstance(row, dict)
+                                and in_snapshot(
+                                    field(row, "shipping_limit_at", "shipping_limit_date"), snapshot
+                                )
+                            ],
+                            "events": [
+                                row for row in data.get("events", [])
+                                if isinstance(row, dict)
+                                and in_snapshot(row.get("event_at"), snapshot)
+                            ],
+                        }
+                    else:
+                        delivered = timestamp(selected.get("order_delivered_customer_date"))
+                        due = timestamp(selected.get("order_estimated_delivery_date"))
+                        data = (
+                            {
+                                "handoff_deadline": selected.get(
+                                    "order_delivered_carrier_date"
+                                ),
+                                "handed_to_carrier_at": selected.get(
+                                    "order_delivered_carrier_date"
+                                ),
+                                "delivery_deadline": selected.get(
+                                    "order_estimated_delivery_date"
+                                ),
+                                "delivered_at": selected.get(
+                                    "order_delivered_customer_date"
+                                ),
+                            }
+                            if delivered is not None and due is not None and delivered <= due
+                            else {}
+                        )
                     refs.append(snapshot["evidence_ref"])
                 analysis, detail = analyze_shipment(data)
                 facts.extend(

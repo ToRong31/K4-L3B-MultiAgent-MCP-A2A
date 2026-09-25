@@ -11,6 +11,25 @@ from .evidence import EvidenceCollector
 from .memory import AgentMemory
 
 
+def _matches_claimed_transaction(
+    row: dict[str, Any], topics: set[str], opened: datetime | None
+) -> bool:
+    """Use the claim only to choose among repeated snapshots of one verified order."""
+    status = str(row.get("order_status") or "").lower()
+    if "canceled_order_paid" in topics:
+        return status == "canceled"
+    if "unavailable_order_paid" in topics:
+        return status == "unavailable"
+    if topics & {"late_delivery_seller", "late_delivery_logistics"}:
+        try:
+            due = datetime.fromisoformat(row["order_estimated_delivery_date"])
+            delivered = datetime.fromisoformat(row["order_delivered_customer_date"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        return delivered > due and (opened is None or due <= opened)
+    return False
+
+
 async def resolve_case_context(
     case: dict[str, Any], evidence: EvidenceCollector, memory: AgentMemory
 ) -> dict[str, Any]:
@@ -129,6 +148,16 @@ async def resolve_case_context(
             if opened is not None and purchased <= opened:
                 dated.append((purchased, row))
         if dated:
+            topics = {
+                str(claim.get("topic"))
+                for claim in case.get("customer_request", {}).get("claims", [])
+                if isinstance(claim, dict)
+            }
+            claimed = [
+                item for item in dated if _matches_claimed_transaction(item[1], topics, opened)
+            ]
+            if claimed:
+                dated = claimed
             latest = max(purchased for purchased, _ in dated)
             matching = {
                 json.dumps(row, sort_keys=True)
@@ -143,6 +172,18 @@ async def resolve_case_context(
                     "order": selected,
                     "evidence_ref": history_ref,
                 }
+                selected_time = datetime.fromisoformat(selected["order_purchase_timestamp"])
+                later = sorted(
+                    {
+                        datetime.fromisoformat(row["order_purchase_timestamp"])
+                        for row in history_records.get(confirmed[0], [])
+                        if isinstance(row.get("order_purchase_timestamp"), str)
+                        and datetime.fromisoformat(row["order_purchase_timestamp"])
+                        > selected_time
+                    }
+                )
+                if later:
+                    snapshot["next_purchase_at"] = later[0].isoformat()
             else:
                 questions.append(
                     "Customer history has conflicting rows at the latest purchase time."

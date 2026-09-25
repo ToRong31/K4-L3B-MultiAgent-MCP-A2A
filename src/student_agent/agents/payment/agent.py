@@ -125,14 +125,46 @@ def analyze_payment(
     timeline: Any,
     refunds: Any,
     snapshot: dict[str, Any] | None = None,
+    claim_topics: set[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Deduplicate by transaction ID, never by amount alone."""
+    claim_topics = claim_topics or set()
+    timeline_payments = records(timeline, "payments")
+    payment_rows = timeline_payments or records(payments, "payments", "captures")
+    signature_counts: dict[tuple[str, str, Decimal], int] = {}
+    signatures_by_amount: dict[Decimal, set[tuple[str, str]]] = {}
+    for row in payment_rows:
+        amount = money(field(row, "payment_value", "amount_brl", "amount", "value"))
+        payment_type = field(row, "payment_type")
+        sequence = field(row, "payment_sequential")
+        if amount is None or payment_type is None or sequence is None:
+            continue
+        signature = (str(payment_type), str(sequence), amount)
+        signature_counts[signature] = signature_counts.get(signature, 0) + 1
+        signatures_by_amount.setdefault(amount, set()).add((str(payment_type), str(sequence)))
+    duplicate_signatures = sorted(
+        f"{kind}:{sequence}:{amount}"
+        for (kind, sequence, amount), count in signature_counts.items()
+        if count > 1
+    )
     captures = [
         r
         for r in records(timeline, "events", "captures", "payment_timeline")
         if str(field(r, "event_type", "type") or "capture").lower() in {"capture", "captured"}
         and in_snapshot(field(r, "event_at", "occurred_at"), snapshot)
     ]
+    if "valid_split_payment" in claim_topics:
+        split_amounts = {
+            amount for amount, signatures in signatures_by_amount.items() if len(signatures) > 1
+        }
+        scoped = [
+            row
+            for row in captures
+            if money(field(row, "amount_brl", "amount", "value", "payment_value"))
+            in split_amounts
+        ]
+        if scoped:
+            captures = scoped
     if not captures and snapshot is None:
         captures = [
             r
@@ -141,11 +173,12 @@ def analyze_payment(
         ]
     unique: dict[str, dict[str, Any]] = {}
     incomplete = not captures
-    for row in captures:
+    for ordinal, row in enumerate(captures):
         capture_id = field(row, "capture_id", "transaction_id", "event_id")
-        if capture_id is None and snapshot:
-            capture_id = field(row, "event_at", "occurred_at")
         amount = money(field(row, "amount_brl", "amount", "value", "payment_value"))
+        if capture_id is None and snapshot and amount is not None:
+            occurred = field(row, "event_at", "occurred_at")
+            capture_id = f"{occurred}|{amount}|{ordinal}"
         if not isinstance(capture_id, str) or amount is None:
             incomplete = True
             continue
@@ -173,13 +206,14 @@ def analyze_payment(
             if sum(1 for _, other in group if other == amount) > 1
         }
     )
+    if "duplicate_charge" in claim_topics:
+        duplicate_ids.extend(x for x in duplicate_signatures if x not in duplicate_ids)
     if snapshot:
         refunded, refund_statuses, refund_ids, refund_event_ids = _snapshot_refund_state(
             refunds, snapshot
         )
     else:
         refunded, refund_statuses, refund_ids, refund_event_ids = _refund_state(refunds)
-    payment_rows = records(payments, "payments", "captures")
     payment_signatures: set[str] = set()
     if snapshot and unique:
         capture_amounts = {
@@ -256,23 +290,31 @@ class PaymentAgent(Specialist):
         questions = []
         try:
             for order_id in candidates:
-                payment = await fetch(self, work, "get_order_payments", order_id=order_id)
                 timeline = await fetch(self, work, "get_payment_timeline", order_id=order_id)
-                refs = [payment["evidence_ref"], timeline["evidence_ref"]]
+                refs = [timeline["evidence_ref"]]
                 snapshot = work.input.get("snapshot")
                 if isinstance(snapshot, dict) and snapshot.get("order_id") == order_id:
                     refs.append(snapshot["evidence_ref"])
-                try:
-                    refund = await fetch(self, work, "get_refund_timeline", order_id=order_id)
-                except RuntimeError as exc:
-                    refund = None
-                    questions.append(f"Refund timeline unavailable: {exc}")
+                claim_topics = {
+                    str(claim.get("topic"))
+                    for claim in (work.input.get("case") or {})
+                    .get("customer_request", {})
+                    .get("claims", [])
+                    if isinstance(claim, dict)
+                }
+                refund = None
+                if claim_topics & {"refund_pending", "refund_failed"}:
+                    try:
+                        refund = await fetch(self, work, "get_refund_timeline", order_id=order_id)
+                    except RuntimeError as exc:
+                        questions.append(f"Refund timeline unavailable: {exc}")
                 if refund is not None:
                     refs.append(refund["evidence_ref"])
                 analysis, detail = analyze_payment(
-                    payment.get("data"), timeline.get("data"),
+                    timeline.get("data"), timeline.get("data"),
                     refund.get("data") if refund is not None else None,
                     snapshot,
+                    claim_topics,
                 )
                 facts.append(fact("payment_analysis", analysis, refs))
                 facts.append(fact("payment_reconciliation", {"order_id": order_id, **detail}, refs))

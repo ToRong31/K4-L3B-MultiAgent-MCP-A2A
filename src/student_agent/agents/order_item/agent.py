@@ -71,14 +71,13 @@ class OrderItemAgent(Specialist):
         facts = []
         try:
             for order_id in candidates:
-                order = await fetch(self, work, "get_order", order_id=order_id)
                 items = await fetch(self, work, "get_order_items", order_id=order_id)
-                refs = [order["evidence_ref"], items["evidence_ref"]]
+                refs = [items["evidence_ref"]]
                 snapshot = work.input.get("snapshot")
                 if isinstance(snapshot, dict) and snapshot.get("order_id") == order_id:
                     refs.append(snapshot["evidence_ref"])
                 entities, detail = analyze_order(
-                    order_id, order.get("data"), items.get("data"), snapshot
+                    order_id, None, items.get("data"), snapshot
                 )
                 facts.extend(
                     (fact("affected_entities", entities, refs), fact("order_state", detail, refs))
@@ -101,30 +100,6 @@ class OrderItemAgent(Specialist):
                                 ]
                             },
                             refs,
-                        )
-                    )
-                if not entities["order_ids"]:
-                    continue
-                if (
-                    (work.input.get("case") or {})
-                    .get("investigation_scope", {})
-                    .get("include_product_context", False)
-                ):
-                    product = await fetch(self, work, "get_product_context", order_id=order_id)
-                    facts.append(
-                        fact(
-                            "product_context",
-                            {"order_id": order_id, "data": product.get("data")},
-                            [product["evidence_ref"]],
-                        )
-                    )
-                if entities["seller_ids"]:
-                    sellers = await fetch(self, work, "get_sellers", order_id=order_id)
-                    facts.append(
-                        fact(
-                            "seller_context",
-                            {"order_id": order_id, "data": sellers.get("data")},
-                            [sellers["evidence_ref"]],
                         )
                     )
         except Exception as exc:

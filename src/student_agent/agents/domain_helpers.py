@@ -62,7 +62,12 @@ def in_snapshot(value: Any, snapshot: dict[str, Any] | None) -> bool:
     event_at = timestamp(value)
     purchased = timestamp(snapshot.get("purchase_at"))
     opened = timestamp(snapshot.get("opened_at"))
-    return bool(event_at and purchased and opened and purchased <= event_at <= opened)
+    next_purchase = timestamp(snapshot.get("next_purchase_at"))
+    if not event_at or not purchased:
+        return False
+    if next_purchase is not None and (opened is None or next_purchase <= opened):
+        return purchased <= event_at < next_purchase
+    return bool(opened and purchased <= event_at <= opened)
 
 
 def ids(values: Any) -> list[str]:
