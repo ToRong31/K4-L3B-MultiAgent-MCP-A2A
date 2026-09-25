@@ -298,7 +298,11 @@ async def solve_case(
     responsible: list[dict[str, str | None]] = (
         list(policy_parties) if isinstance(policy_parties, list) else []
     )
-    if not responsible and shipment_verdict == "seller_delay":
+    if shipment_verdict == "seller_delay" and late_sellers:
+        responsible = [
+            {"party_type": "seller", "party_id": value} for value in late_sellers
+        ]
+    elif not responsible and shipment_verdict == "seller_delay":
         responsible.extend({"party_type": "seller", "party_id": value} for value in late_sellers)
     elif not responsible and shipment_verdict in {"logistics_delay", "lost", "returned"}:
         responsible.append({"party_type": "logistics_provider", "party_id": None})
