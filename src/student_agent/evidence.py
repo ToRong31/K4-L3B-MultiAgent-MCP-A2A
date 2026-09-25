@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .mcp_gateway import EvidenceGateway
+from .mcp_gateway import EvidenceGateway, MCPToolError
 from .trace import TraceWriter
 
 
@@ -112,6 +112,8 @@ class EvidenceLedger:
                 return record
             except RuntimeError as exc:
                 last_error = exc
+                if isinstance(exc, MCPToolError) and not exc.retryable:
+                    break
                 if attempt >= self.retry_limit:
                     break
                 await asyncio.sleep((0.2 * (2**attempt)) + random.uniform(0, 0.1))

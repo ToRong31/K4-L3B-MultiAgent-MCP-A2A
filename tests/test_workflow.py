@@ -36,18 +36,45 @@ class FakeGateway:
             },
             "get_product_context": {"products": [{"product_id": "product-1"}]},
             "get_shipment_summary": {
-                "order_delivered_carrier_date": "2018-01-03T00:00:00Z",
-                "shipping_limit_date": "2018-01-02T00:00:00Z",
-                "order_delivered_customer_date": "2018-01-08T00:00:00Z",
-                "order_estimated_delivery_date": "2018-01-10T00:00:00Z",
+                "delivered_carrier_at": "2018-01-03T00:00:00Z",
+                "delivered_customer_at": "2018-01-08T00:00:00Z",
+                "estimated_delivery_at": "2018-01-10T00:00:00Z",
+                "shipping_limits": [{"shipping_limit_at": "2018-01-02T00:00:00Z"}],
+                "events": [
+                    {
+                        "event_type": "delivered_late",
+                        "actor": "logistics_provider",
+                        "status": "confirmed",
+                    }
+                ],
                 "shipment_id": "shipment-1",
             },
             "get_order_payments": {
-                "payments": [{"payment_value": "100.00", "payment_id": "payment-1"}]
+                "payments": [
+                    {"payment_value": "84.00", "payment_id": "payment-1"},
+                    {"payment_value": "16.00", "payment_id": "payment-2"},
+                ]
             },
-            "get_payment_timeline": {"events": [{"event_type": "captured"}]},
+            "get_payment_timeline": {
+                "events": [
+                    {"event_type": "captured", "amount_brl": "84.00"},
+                    {"event_type": "captured", "amount_brl": "16.00"},
+                ]
+            },
             "get_refund_timeline": {"events": []},
-            "get_policy": {"policy_version": "EC_POLICY_V2"},
+            "get_policy": {
+                "policy_version": "EC_POLICY_V2",
+                "rules": {
+                    "late_delivery_logistics": {
+                        "case_status": "action_required",
+                        "recommended_action": "refund_freight",
+                        "refund_brl": 16.0,
+                        "responsible_parties": [
+                            {"party_type": "logistics_provider", "party_id": None}
+                        ],
+                    }
+                },
+            },
             "get_customer_history": {
                 "customer_unique_id": "customer-1",
                 "orders": [{"order_id": order_id}],
@@ -86,7 +113,7 @@ def test_workflow_produces_verified_schema_output(tmp_path: Path) -> None:
         "customer_request": {
             "claimed_order_id": "order-1",
             "claims": [
-                {"claim_id": "claim-1", "topic": "late_delivery_seller"},
+                {"claim_id": "claim-1", "topic": "late_delivery_logistics"},
                 {"claim_id": "claim-2", "topic": "requested_full_refund"},
             ],
         },
@@ -99,8 +126,8 @@ def test_workflow_produces_verified_schema_output(tmp_path: Path) -> None:
     output = asyncio.run(solve_case(case, gateway, trace))  # type: ignore[arg-type]
 
     contracts.validate_output(output, "test output")
-    assert output["assessment"]["primary_issue"] == "late_delivery_seller"
-    assert output["financial_resolution"]["recommended_refund_brl"] == 100.0
+    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
+    assert output["financial_resolution"]["recommended_refund_brl"] == 16.0
     assert output["entity_resolution"]["rejected_candidates"] == ["candidate-1"]
     assert len(gateway.calls) == 9
     events = [

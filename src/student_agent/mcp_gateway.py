@@ -12,6 +12,12 @@ from mcp.client.streamable_http import streamable_http_client
 from .contracts import Contracts
 
 
+class MCPToolError(RuntimeError):
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class EvidenceGateway:
     def __init__(self, session: ClientSession, contracts: Contracts) -> None:
         self._session = session
@@ -44,7 +50,12 @@ class EvidenceGateway:
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
-            raise RuntimeError(f"MCP tool {tool_name} failed: {message or 'unknown error'}")
+            detail = message or "unknown error"
+            retryable = any(
+                marker in detail.lower()
+                for marker in ("timeout", "temporarily", "unavailable", "internal", "overload")
+            )
+            raise MCPToolError(f"MCP tool {tool_name} failed: {detail}", retryable=retryable)
         evidence = getattr(result, "structuredContent", None)
         if evidence is None:
             evidence = getattr(result, "structured_content", None)

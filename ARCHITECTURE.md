@@ -41,7 +41,8 @@ Entity resolver ──MCP──► Coordinator/query planner
 
 Mỗi case có state riêng. Không evidence, cache key, retry state hoặc model conversation nào
 được chia sẻ giữa các case. Các specialist có thể chạy đồng thời sau khi entity đã được
-resolve, nhưng MCP concurrency phải có semaphore để tránh burst và timeout.
+resolve. MCP Streamable HTTP session hiện tại được gọi tuần tự để tránh multiplexing làm hỏng
+transport; concurrency chỉ được tăng sau khi backend chứng minh hỗ trợ an toàn.
 
 ## 2. Agent ownership
 
@@ -128,7 +129,7 @@ là `null`, status chuyển `needs_investigation` khi phù hợp và confidence 
 Query planner resolve entity trước; chỉ sau đó mới fan-out các domain cần cho claim/scope.
 Không query product/customer history nếu kết quả không thể thay đổi output. Negative result cũng
 được cache. Calls giống nhau trong một case được coalesce bằng single-flight. MCP concurrency
-mặc định 3. Early-stop khi đã đủ evidence để phân loại issue, tính refund và pass verifier.
+mặc định 1. Early-stop khi đã đủ evidence để phân loại issue, tính refund và pass verifier.
 
 ## 6. Verification invariants
 
@@ -176,7 +177,7 @@ dài vì sẽ gây KV-cache thrashing.
 
 - Python 3.11; dependencies pin theo `pyproject.toml` và lock file khi chốt runtime.
 - Model ID, quantization filename/hash, runtime/version và chat template được ghi trong config.
-- Default: MCP concurrency 3, model concurrency 1, temperature 0.1, fixed seed khi hỗ trợ.
+- Default: MCP concurrency 1, model concurrency 1, temperature 0.1, fixed seed khi hỗ trợ.
 - Commands: `day09 validate-inputs`, `day09 mcp-tools`, `day09 run`, `day09 validate`,
   `day09 package --output dist/submission.zip`.
 - Mỗi run bắt đầu với output/trace sạch; evidence không persist/reuse giữa runs.

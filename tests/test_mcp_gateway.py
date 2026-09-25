@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from student_agent.mcp_gateway import EvidenceGateway
+from student_agent.mcp_gateway import EvidenceGateway, MCPToolError
 
 
 class FakeContracts:
@@ -54,5 +54,6 @@ def test_gateway_raises_tool_error_for_snake_case_result() -> None:
         content=[SimpleNamespace(text="not found")],
     )
     gateway = EvidenceGateway(FakeSession(result), FakeContracts())  # type: ignore[arg-type]
-    with pytest.raises(RuntimeError, match="not found"):
+    with pytest.raises(MCPToolError, match="not found") as error:
         asyncio.run(gateway.call("get_order", case_id="CASE_001", order_id="missing"))
+    assert error.value.retryable is False
