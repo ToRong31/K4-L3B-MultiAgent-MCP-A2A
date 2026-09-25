@@ -16,10 +16,13 @@ class ModelConfig:
     context_tokens: int = 8192
     temperature: float = 0.1
     request_timeout_seconds: float = 45.0
+    api_key: str | None = None
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.base_url)
-        if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        if not self.api_key and (
+            parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        ):
             raise ValueError("model endpoint must be local HTTP")
         if not 1024 <= self.context_tokens <= 8192:
             raise ValueError("model context must be between 1024 and 8192 tokens")
@@ -40,7 +43,10 @@ class LocalModelWorker:
 
     async def ready(self) -> bool:
         try:
-            async with httpx2.AsyncClient(timeout=3.0) as client:
+            headers = (
+                {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
+            )
+            async with httpx2.AsyncClient(timeout=5.0, headers=headers) as client:
                 url = (
                     f"{self.config.base_url.rstrip('/')}/models"
                     if "/v1" in self.config.base_url
@@ -55,9 +61,14 @@ class LocalModelWorker:
     async def complete(
         self, *, system: str, payload: dict[str, Any], schema: dict[str, Any], max_tokens: int
     ) -> dict[str, Any]:
+        headers = (
+            {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
+        )
         async with self._lock:
             self.invocations += 1
-            async with httpx2.AsyncClient(timeout=self.config.request_timeout_seconds) as client:
+            async with httpx2.AsyncClient(
+                timeout=self.config.request_timeout_seconds, headers=headers
+            ) as client:
                 if self.is_ollama:
                     base = self.config.base_url.replace("/v1", "").rstrip("/")
                     request = {
@@ -90,7 +101,7 @@ class LocalModelWorker:
                                 "content": json.dumps(payload, ensure_ascii=False, default=str),
                             },
                         ],
-                        "response_format": {"type": "json_object", "schema": schema},
+                        "response_format": {"type": "json_object"},
                         "temperature": self.config.temperature,
                         "max_tokens": max_tokens,
                         "stream": False,

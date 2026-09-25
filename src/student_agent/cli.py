@@ -41,7 +41,11 @@ async def _run(
     metrics_path = root / "traces" / "run-metrics.jsonl"
     summary_path = root / "traces" / "run-summary.json"
     model_worker = LocalModelWorker(
-        ModelConfig(base_url=settings.model_base_url, model=settings.model_id)
+        ModelConfig(
+            base_url=settings.model_base_url,
+            model=settings.model_id,
+            api_key=settings.model_api_key,
+        )
     )
     model_ready = await model_worker.ready()
     if model_ready:

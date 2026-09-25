@@ -18,6 +18,7 @@ class Settings:
     root: Path
     model_base_url: str = "http://127.0.0.1:8080/v1"
     model_id: str = "IFM/K2-Horizon-7B-GGUF:Q4_K_M"
+    model_api_key: str | None = None
 
     @classmethod
     def load(cls, root: Path | None = None) -> Settings:
@@ -35,6 +36,9 @@ class Settings:
             errors.append("MCP_ENDPOINT must be an absolute HTTP(S) URL")
         if errors:
             raise ValueError("; ".join(errors))
+        model_api_key = (
+            os.getenv("OPENAI_API_KEY") or os.getenv("LOCAL_MODEL_API_KEY") or ""
+        ).strip() or None
         return cls(
             api_url,
             team_key,
@@ -42,4 +46,5 @@ class Settings:
             resolved_root,
             os.getenv("LOCAL_MODEL_BASE_URL", "http://127.0.0.1:8080/v1").strip(),
             os.getenv("LOCAL_MODEL_ID", "IFM/K2-Horizon-7B-GGUF:Q4_K_M").strip(),
+            model_api_key,
         )
