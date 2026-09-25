@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from typing import Any
 
 import httpx2
@@ -18,13 +19,22 @@ class EvidenceGateway:
         self._contracts = contracts
 
     async def list_tools(self) -> list[str]:
+        return sorted(await self.describe_tools())
+
+    async def describe_tools(self) -> dict[str, dict[str, Any]]:
+        """Return discovered input schemas, without changing the legacy name API."""
         response = await self._session.list_tools()
-        return sorted(tool.name for tool in response.tools)
+        return {
+            tool.name: deepcopy(
+                getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None) or {}
+            )
+            for tool in response.tools
+        }
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
         result = await self._session.call_tool(tool_name, arguments=payload)
-        if result.isError:
+        if getattr(result, "is_error", getattr(result, "isError", False)):
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )

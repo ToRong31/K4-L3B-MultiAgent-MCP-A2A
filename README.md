@@ -115,6 +115,63 @@ Tất cả MCP calls đều được audit và có thể ảnh hưởng điểm 
 
 ## 5. Xây dựng multi-agent workflow
 
+### Skeleton A2A / LLM provider hiện có
+
+```text
+src/student_agent/
+├── orchestrator/coordinator.py   # giao việc, gom Finding, policy rồi verifier
+├── agents/
+│   ├── order_item/agent.py
+│   ├── payment/agent.py
+│   ├── shipment/agent.py
+│   ├── policy/agent.py
+│   ├── verifier/agent.py
+│   └── serve.py               # chạy một A2A server cho mỗi agent
+├── core/
+│   ├── a2a_transport.py       # A2A SDK v1 server/client
+│   ├── agent_messages.py      # WorkOrder và Finding
+│   ├── memory.py              # SQLite memory riêng theo case và agent
+│   ├── llm_client.py          # OpenRouter/OpenAI và compact khi >80% context
+│   └── evidence.py            # MCP call cache và lưu tool output
+└── workflow.py                # entry point cho day09 run
+```
+
+Sau `pip install -e ".[dev]"`, chọn `LLM_PROVIDER=openrouter` (mặc định)
+hoặc `LLM_PROVIDER=openai` trong `.env`. Đặt `OPENROUTER_API_KEY`,
+`OPENROUTER_MODEL` cho OpenRouter; hoặc `OPENAI_API_KEY`, `OPENAI_MODEL`
+cho OpenAI. `*_BASE_URL` có giá trị mặc định tương ứng, còn
+`*_CONTEXT_LENGTH` mặc định là 32768. Có thể đặt `OPENROUTER_ORDER_MODEL`,
+`OPENAI_PAYMENT_MODEL`, ... để chọn model riêng cho từng agent. Cấu hình thêm
+năm URL `A2A_*_URL` rồi mở năm
+terminal, mỗi terminal chạy một lệnh:
+
+Đặt `L3B_RUN_ID` thành một chuỗi duy nhất cho mỗi lần chạy trong `.env`.
+Coordinator và cả năm A2A server phải dùng cùng giá trị này và cùng
+`AGENT_MEMORY_DB`. Khởi động lại các server sau khi đổi `.env`.
+
+```text
+python -m student_agent.agents.serve order 9001
+python -m student_agent.agents.serve payment 9002
+python -m student_agent.agents.serve shipment 9003
+python -m student_agent.agents.serve policy 9004
+python -m student_agent.agents.serve verifier 9005
+```
+
+Client LLM được truyền vào từng agent theo provider đã chọn. Logic phân tích
+nghiệp vụ hiện tại vẫn chạy tất định và chưa gọi LLM trong `investigate()`.
+
+Skeleton đã truyền message qua A2A SDK v1 và lưu lịch sử riêng từng agent.
+Public JSON Schema được kiểm tra fingerprint khi khởi động; tool MCP bị giới hạn
+theo quyền từng agent, query budget và một lần retry cho lỗi mạng/timeout.
+Các `investigate()` hiện trả `needs_evidence` có chủ ý. Cần triển khai MCP
+evidence, entity resolution, conflict resolution, ghép output và verifier trước
+khi `day09 run` có thể tạo file nộp bài; coordinator sẽ dừng rõ ràng nếu thiếu
+các bước này. Không tạo kết luận hoặc `evidence_ref` giả để lấp chỗ trống.
+
+`runtime/agent-memory.sqlite3` là dữ liệu nội bộ, được ignore khỏi Git và
+không nằm trong submission ZIP. `history()` trả context đã compact cho model;
+`raw_history()` vẫn đọc được toàn bộ chat, handoff, tool call và tool output.
+
 Triển khai tại:
 
 ```text
