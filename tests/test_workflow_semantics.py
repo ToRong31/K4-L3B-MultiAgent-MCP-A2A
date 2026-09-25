@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from student_agent.contracts import Contracts
 from student_agent.trace import TraceWriter
 from student_agent.workflow import solve_case
@@ -22,6 +24,47 @@ class FakeGateway:
             "result_hash": "sha256:" + "a" * 64,
             "domain": "order",
             "data": self.payloads[tool_name],
+        }
+
+
+class FailingGateway(FakeGateway):
+    async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
+        if tool_name == "get_product_context":
+            raise RuntimeError("simulated MCP failure")
+        return await super().call(tool_name, case_id=case_id, **arguments)
+
+
+class FakePolicyAdvisor:
+    is_available = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat_json(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        return {
+            "primary_issue": "unsupported_claim",
+            "responsible_parties": [
+                {"party_type": "logistics_provider", "party_id": "invented-id"}
+            ],
+            "ranked_causes": [{"cause_code": "CARRIER_SLA_BREACH", "rank": 1}],
+            "resolution_actions": ["open_carrier_claim", "notify_customer"],
+            "recommended_refund_brl": 15.0,
+            "refund_lines": [
+                {"reason_code": "invented", "amount_brl": 999, "entity_id": "invented"}
+            ],
+            "claim_verdicts": [
+                {
+                    "claim_id": "claim-primary",
+                    "verdict": "unsupported",
+                    "confidence": 0.94,
+                },
+                {
+                    "claim_id": "claim-refund",
+                    "verdict": "partially_supported",
+                    "confidence": 0.82,
+                },
+            ],
         }
 
 
@@ -114,14 +157,12 @@ def test_duplicate_capture_refunds_only_the_overcharge(tmp_path: Path) -> None:
     payloads["get_shipment_summary"]["summary"]["order_delivered_customer_date"] = (
         "2018-01-08T09:00:00"
     )
-    payloads["get_order_payments"] = {
+    payloads["get_payment_timeline"] = {
         "payments": [
             {"payment_id": "pay-1", "payment_value": "110.00"},
             {"payment_id": "pay-2", "payment_value": "110.00"},
-        ]
-    }
-    payloads["get_payment_timeline"] = {
-        "events": [{"event_type": "duplicate_capture", "status": "confirmed"}]
+        ],
+        "events": [{"event_type": "duplicate_capture", "status": "confirmed"}],
     }
     gateway = FakeGateway(payloads)
 
@@ -135,7 +176,9 @@ def test_duplicate_capture_refunds_only_the_overcharge(tmp_path: Path) -> None:
     assert output["financial_resolution"]["recommended_refund_brl"] == 110.0
     assert output["claim_assessments"][1]["verdict"] == "partially_supported"
     assert "get_payment_timeline" in gateway.calls
+    assert "get_order_payments" not in gateway.calls
     assert "get_refund_timeline" not in gateway.calls
+    assert len(gateway.calls) == 7
 
 
 def test_refund_case_uses_only_authoritative_refund_timeline(tmp_path: Path) -> None:
@@ -218,10 +261,52 @@ def test_canceled_paid_order_does_not_query_missing_refund_record(tmp_path: Path
 
 def test_topic_specific_verdicts_are_normalized_when_evidence_exists(tmp_path: Path) -> None:
     payloads = base_payloads()
-    payloads["get_payment_timeline"] = {"events": [{"event_type": "captured"}]}
+    payloads["get_payment_timeline"] = {
+        "payments": [{"payment_id": "pay-1", "payment_value": "110.00"}],
+        "events": [{"event_type": "captured"}],
+    }
     gateway = FakeGateway(payloads)
 
     output = asyncio.run(solve_case(make_case("payment_mismatch"), gateway, trace_writer(tmp_path)))
 
     assert output["payment_analysis"]["verdict"] == "capture_mismatch"
     assert output["payment_analysis"]["refundable_total_brl"] == 0.0
+    assert "get_order_payments" not in gateway.calls
+    assert len(gateway.calls) == 7
+
+
+def test_any_requested_mcp_failure_aborts_the_case(tmp_path: Path) -> None:
+    gateway = FailingGateway(base_payloads())
+
+    with pytest.raises(RuntimeError, match="required MCP evidence call.*get_product_context"):
+        asyncio.run(solve_case(make_case("valid_split_payment"), gateway, trace_writer(tmp_path)))
+
+
+def test_llm_advises_policy_but_cannot_override_core_facts(tmp_path: Path) -> None:
+    gateway = FakeGateway(base_payloads())
+    advisor = FakePolicyAdvisor()
+
+    output = asyncio.run(
+        solve_case(
+            make_case("late_delivery_logistics"),
+            gateway,
+            trace_writer(tmp_path),
+            llm=advisor,
+        )
+    )
+
+    assert advisor.calls == 1
+    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
+    assert output["shipment_analysis"]["verdict"] == "logistics_delay"
+    assert output["claim_assessments"][0]["verdict"] == "supported"
+    assert output["root_cause_analysis"]["ranked_causes"] == [
+        {"cause_code": "CARRIER_SLA_BREACH", "rank": 1}
+    ]
+    assert output["root_cause_analysis"]["responsible_parties"] == [
+        {"party_type": "logistics_provider", "party_id": None}
+    ]
+    assert output["resolution_actions"] == ["open_carrier_claim", "notify_customer"]
+    assert output["financial_resolution"]["recommended_refund_brl"] == 15.0
+    assert output["financial_resolution"]["refund_lines"] == [
+        {"reason_code": "customer_refund", "amount_brl": 15.0, "entity_id": None}
+    ]

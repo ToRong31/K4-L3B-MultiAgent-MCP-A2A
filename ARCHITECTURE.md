@@ -16,7 +16,7 @@ Input → Entity Resolver → Coordinator dispatch
             │                 │                 │
             └─────────────────┼─────────────────┘
                               ▼
-                 Deterministic Policy Agent ← get_policy(EC_POLICY_V2)
+              Guarded Hybrid Policy Agent ← get_policy(EC_POLICY_V2)
                               │
                        Verifier Agent (cross-field consistency + calibration)
                               │
@@ -33,8 +33,8 @@ Input → Entity Resolver → Coordinator dispatch
 | entity-agent | candidate_order_ids, customer_unique_id_hint | Resolve order ID thật, reject fakes, lấy customer context | get_order, get_customer_history | resolved_order_ids, rejected_candidates, customer_context |
 | order-agent | resolved_order_ids | Thu thập item, seller ID và product context | get_order_items, get_product_context | affected_entities, order/product data |
 | shipment-agent | order data | Phân tích timeline giao hàng, xác định delay | get_shipment_summary | shipment_analysis |
-| payment-agent | order data + claim topic | Đối soát payment; chỉ gọi lifecycle/refund tool khi issue liên quan | get_order_payments; conditional get_payment_timeline/get_refund_timeline | payment_analysis |
-| policy-agent | all normalized evidence | Áp dụng finite-state rules và policy; evidence mạnh được ưu tiên hơn customer claim | get_policy | assessment, root_cause_analysis, financial_resolution, resolution_actions |
+| payment-agent | order data + claim topic | Đối soát payment; timeline payment thay base payment call khi issue liên quan | get_order_payments hoặc get_payment_timeline; conditional get_refund_timeline | payment_analysis |
+| policy-agent | normalized + raw evidence | Deterministic baseline; optional GPT policy advice cho causes/actions/conflicts, không được override core facts | get_policy | assessment, root_cause_analysis, financial_resolution, resolution_actions |
 | verifier-agent | full output draft | Kiểm tra cross-field consistency, calibration confidence | none | Validated final output |
 
 Áp dụng least privilege; tool discovery không đồng nghĩa mọi actor đều được gọi mọi tool.
@@ -62,14 +62,16 @@ Input → Entity Resolver → Coordinator dispatch
 
 | Failure | Retry budget | Fallback | Trace event/code |
 | --- | ---: | --- | --- |
-| MCP timeout/error | 0 automatic retries | Skip tool, mark insufficient_evidence | warning log; no duplicate audited call |
+| MCP timeout/error | 0 automatic retries | Abort toàn bộ run; xóa artifact dở và chạy lại `--fresh` | warning log; no duplicate audited call |
 | Entity not found/ambiguous | 0 | Try claimed_order_id only if it was not already checked | handoff attributes |
 | Source conflict | 0 | Record in data_conflicts; shipment summary wins delivery fields | policy_decided conflict_count |
 
 Cache per-case: lưu kết quả MCP theo (tool_name, case_id, key_args) để tránh gọi trùng.
-Query budget target: 7 base calls/case; 8 calls cho payment/refund lifecycle case có timeline
-authoritative. `get_sellers`
-không được gọi vì seller IDs đã có trong `get_order_items`; timeline tools không được gọi dàn trải.
+Query budget target: 7 calls/case, kể cả payment lifecycle vì `get_payment_timeline` đã chứa
+base payment rows; 8 calls cho refund lifecycle cần cả payment và refund state. Gateway cũ thiếu
+payment rows trong timeline được fallback sang `get_order_payments` để ưu tiên tính đúng.
+`get_sellers` không được gọi vì seller IDs đã có trong `get_order_items`; timeline tools không
+được gọi dàn trải.
 
 ## 6. Verification invariants
 
@@ -87,7 +89,9 @@ Trước finalize, verifier kiểm tra:
 
 ## 7. Reproducibility
 
-- Decision engine: deterministic rules over normalized MCP evidence; no external LLM call in the scoring path
+- Decision engine: deterministic core plus optional `openai/gpt-4o-mini` policy advisor via OpenRouter
+- LLM guardrails: cannot change primary issue, case status, confidence, entity resolution,
+  shipment verdict or payment verdict; invalid/error response falls back to baseline
 - Dependencies: pinned in pyproject.toml
 - Concurrency: sequential per case (no parallelism)
 - Command: `day09 run` then `day09 package --output dist/submission.zip`

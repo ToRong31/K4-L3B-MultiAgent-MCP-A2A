@@ -23,6 +23,7 @@ class Settings:
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
+    enable_llm_policy: bool = False
 
     @classmethod
     def load(cls, root: Path | None = None) -> Settings:
@@ -34,16 +35,22 @@ class Settings:
         llm_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
 
         openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        openrouter_base_url = os.getenv(
-            "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
-        ).strip().rstrip("/")
+        openrouter_base_url = (
+            os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip().rstrip("/")
+        )
         openrouter_model = os.getenv("OPENROUTER_MODEL", "qwen/qwen3.5-9b").strip()
 
         openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        openai_base_url = os.getenv(
-            "OPENAI_BASE_URL", "https://api.openai.com/v1"
-        ).strip().rstrip("/")
+        openai_base_url = (
+            os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+        )
         openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+        enable_llm_policy = os.getenv("ENABLE_LLM_POLICY", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         if not llm_provider:
             if openrouter_api_key:
@@ -74,4 +81,5 @@ class Settings:
             openai_api_key=openai_api_key,
             openai_base_url=openai_base_url,
             openai_model=openai_model,
+            enable_llm_policy=enable_llm_policy,
         )

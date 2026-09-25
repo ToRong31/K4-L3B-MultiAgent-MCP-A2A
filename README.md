@@ -45,7 +45,15 @@ day09 --help
 COMPETITION_API_URL=http://127.0.0.1:8081
 COMPETITION_TEAM_API_KEY=sk-team-your_key
 MCP_ENDPOINT=http://127.0.0.1:8001/mcp
+ENABLE_LLM_POLICY=true
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_openrouter_key
+OPENROUTER_MODEL=openai/gpt-4o-mini
 ```
+
+`ENABLE_LLM_POLICY=true` bật GPT-4o-mini như policy advisor có guardrail. Nếu LLM lỗi,
+workflow tự dùng deterministic baseline; LLM không được sửa primary issue, trạng thái case,
+shipment/payment verdict hoặc entity đã resolve.
 
 ## 3. Tải input
 
@@ -147,7 +155,7 @@ Hoàn thiện mô tả thiết kế trong `ARCHITECTURE.md`.
 ## 6. Chạy và kiểm tra
 
 ```bash
-day09 run
+day09 run --fresh
 day09 validate
 ```
 

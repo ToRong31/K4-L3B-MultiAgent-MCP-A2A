@@ -14,6 +14,7 @@ from .agents import (
     run_shipment_agent,
     run_verifier_agent,
 )
+from .llm import LLMClient
 from .mcp_gateway import EvidenceGateway
 from .trace import TraceWriter
 
@@ -21,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 async def solve_case(
-    case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
+    case: dict[str, Any],
+    gateway: EvidenceGateway,
+    trace: TraceWriter,
+    llm: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Implement the L3B coordinator and specialist-agent workflow.
 
@@ -79,11 +83,19 @@ async def solve_case(
         gateway,
         trace,
         cache,
+        llm,
         entity_result,
         shipment_result,
         payment_result,
         entities,
     )
+
+    if cache.failures:
+        failed = ", ".join(cache.failures)
+        raise RuntimeError(
+            f"{case_id}: required MCP evidence call(s) failed: {failed}; "
+            "discard this run and retry with --fresh"
+        )
 
     # ── Assemble Output ──
     output: dict[str, Any] = {

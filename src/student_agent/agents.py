@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -175,6 +176,45 @@ def _item_total(cache: EvidenceCache) -> float:
     return round(total, 2)
 
 
+def _collect_payment_rows(
+    data: Any,
+    payment_values: list[float],
+    payment_refs: list[str],
+) -> int:
+    """Extract canonical payment rows and return how many amounts were found."""
+    before = len(payment_values)
+    payment_records = [
+        payment
+        for payment in _walk_dicts(data)
+        if any(
+            key in payment
+            for key in (
+                "payment_value",
+                "captured_amount",
+                "capture_amount",
+                "payment_sequential",
+                "payment_id",
+            )
+        )
+    ]
+    canonical_records = [payment for payment in payment_records if "payment_value" in payment]
+    for payment in canonical_records or payment_records:
+        value = _as_float(
+            payment.get(
+                "payment_value",
+                payment.get("captured_amount", payment.get("capture_amount")),
+            )
+        )
+        if value is not None and value >= 0:
+            payment_values.append(value)
+        ref_id = payment.get(
+            "payment_id", payment.get("transaction_id", payment.get("payment_sequential"))
+        )
+        if ref_id not in (None, ""):
+            payment_refs.append(str(ref_id))
+    return len(payment_values) - before
+
+
 class EvidenceCache:
     """Per-case cache to avoid duplicate MCP calls and optimize efficiency score."""
 
@@ -183,6 +223,7 @@ class EvidenceCache:
         self._refs: list[str] = []
         self._refs_by_tool: dict[str, list[str]] = {}
         self._data_by_tool: dict[str, list[Any]] = {}
+        self._failures: list[str] = []
 
     def _key(self, tool_name: str, **kwargs: str) -> str:
         parts = [tool_name] + [f"{k}={v}" for k, v in sorted(kwargs.items())]
@@ -201,7 +242,11 @@ class EvidenceCache:
         if cache_key in self._store:
             return self._store[cache_key]
 
-        evidence = await gateway.call(tool_name, case_id=case_id, **kwargs)
+        try:
+            evidence = await gateway.call(tool_name, case_id=case_id, **kwargs)
+        except Exception:
+            self._failures.append(tool_name)
+            raise
         self._store[cache_key] = evidence
         self._data_by_tool.setdefault(tool_name, []).append(evidence.get("data"))
         ref = evidence.get("evidence_ref", "")
@@ -229,6 +274,10 @@ class EvidenceCache:
 
     def data_for(self, tool_name: str) -> list[Any]:
         return self._data_by_tool.get(tool_name, [])[:]
+
+    @property
+    def failures(self) -> list[str]:
+        return list(dict.fromkeys(self._failures))
 
 
 async def run_entity_agent(
@@ -272,8 +321,8 @@ async def run_entity_agent(
                 order_payloads[cid] = ev.get("data")
             else:
                 rejected_ids.append(cid)
-        except Exception:
-            logger.warning("get_order failed for candidate %s in %s", cid, case_id)
+        except Exception as exc:
+            logger.warning("get_order failed for candidate %s in %s: %s", cid, case_id, exc)
             rejected_ids.append(cid)
 
     # Fallback: if no resolved, use claimed_order_id
@@ -304,8 +353,8 @@ async def run_entity_agent(
             related_order_ids = [
                 str(order_id) for order_id in _all_values(data, "order_id") if order_id
             ]
-        except Exception:
-            logger.warning("get_customer_history failed for %s", case_id)
+        except Exception as exc:
+            logger.warning("get_customer_history failed for %s: %s", case_id, exc)
 
     # Customer history is independent verification. Do not reject a valid order merely
     # because a sparse history response omitted it, but calibrate confidence accordingly.
@@ -610,60 +659,12 @@ async def run_payment_agent(
     primary_topic = _topic(case)
 
     for order_id in resolved_order_ids:
-        # Get payments
-        try:
-            ev = await cache.call(
-                gateway,
-                trace,
-                "get_order_payments",
-                case_id=case_id,
-                actor=actor,
-                order_id=order_id,
-            )
-            data = ev.get("data", {})
-            payment_payloads.append(data)
-            # Payment rows are nested under different keys across MCP revisions.
-            # Identify actual rows by their characteristic fields and coerce JSON strings.
-            payment_records = [
-                payment
-                for payment in _walk_dicts(data)
-                if any(
-                    key in payment
-                    for key in (
-                        "payment_value",
-                        "captured_amount",
-                        "capture_amount",
-                        "payment_sequential",
-                        "payment_id",
-                    )
-                )
-            ]
-            canonical_records = [
-                payment for payment in payment_records if "payment_value" in payment
-            ]
-            for payment in canonical_records or payment_records:
-                value = _as_float(
-                    payment.get(
-                        "payment_value",
-                        payment.get("captured_amount", payment.get("capture_amount")),
-                    )
-                )
-                if value is not None and value >= 0:
-                    payment_values.append(value)
-                ref_id = payment.get(
-                    "payment_id", payment.get("transaction_id", payment.get("payment_sequential"))
-                )
-                if ref_id not in (None, ""):
-                    payment_refs.append(str(ref_id))
-        except Exception:
-            logger.warning("get_order_payments failed for %s", order_id)
-
-        # Lifecycle tools are issue-directed. Calling both for every case diluted
-        # evidence precision and exceeded the private per-case call budget.
-        if primary_topic in {
-            "payment_mismatch",
-            "duplicate_charge",
-        }:
+        # The authoritative payment timeline already includes base payment rows.
+        # For lifecycle disputes it replaces get_order_payments, saving one MCP call.
+        # Fall back to the base tool only if an older gateway omits those rows.
+        timeline_as_base = primary_topic in {"payment_mismatch", "duplicate_charge"}
+        payment_rows_found = 0
+        if timeline_as_base:
             try:
                 ev = await cache.call(
                     gateway,
@@ -673,9 +674,28 @@ async def run_payment_agent(
                     actor=actor,
                     order_id=order_id,
                 )
-                timeline_payloads.append(ev.get("data"))
+                data = ev.get("data", {})
+                timeline_payloads.append(data)
+                payment_payloads.append(data)
+                payment_rows_found = _collect_payment_rows(data, payment_values, payment_refs)
             except Exception:
                 logger.warning("get_payment_timeline failed for %s", order_id)
+
+        if not timeline_as_base or payment_rows_found == 0:
+            try:
+                ev = await cache.call(
+                    gateway,
+                    trace,
+                    "get_order_payments",
+                    case_id=case_id,
+                    actor=actor,
+                    order_id=order_id,
+                )
+                data = ev.get("data", {})
+                payment_payloads.append(data)
+                _collect_payment_rows(data, payment_values, payment_refs)
+            except Exception:
+                logger.warning("get_order_payments failed for %s", order_id)
 
         # Get refund timeline
         if primary_topic in {
@@ -813,6 +833,7 @@ async def run_policy_agent(
     gateway: EvidenceGateway,
     trace: TraceWriter,
     cache: EvidenceCache,
+    llm: Any | None,
     entity_result: dict[str, Any],
     shipment_result: dict[str, Any],
     payment_result: dict[str, Any],
@@ -839,8 +860,8 @@ async def run_policy_agent(
             actor=actor,
             policy_version=case.get("policy_version", "EC_POLICY_V2"),
         )
-    except Exception:
-        logger.warning("get_policy failed for %s", case_id)
+    except Exception as exc:
+        logger.warning("get_policy failed for %s: %s", case_id, exc)
 
     # Policy decisions are deliberately deterministic. The previous implementation
     # sent only lossy summaries to a small LLM, which collapsed most cases to
@@ -858,6 +879,22 @@ async def run_policy_agent(
         entities=entities,
         cache=cache,
     )
+    llm_used = False
+    if llm is not None and getattr(llm, "is_available", True):
+        try:
+            advice = await _llm_policy_advice(
+                llm=llm,
+                case=case,
+                cache=cache,
+                baseline=result,
+                entities=entities,
+                shipment=shipment,
+                payment=payment,
+            )
+            result = _merge_policy_advice(result, advice, payment, entities)
+            llm_used = True
+        except Exception as exc:
+            logger.warning("LLM policy advice failed for %s; using baseline: %s", case_id, exc)
 
     # Normalize and validate the result
     assessment = _normalize_assessment(result, shipment, payment, entity_res)
@@ -875,6 +912,7 @@ async def run_policy_agent(
         attributes={
             "confidence": assessment.get("confidence", 0.5),
             "conflict_count": len(data_conflicts),
+            "llm_advice_used": llm_used,
         },
     )
 
@@ -893,6 +931,176 @@ async def run_policy_agent(
         "data_conflicts": data_conflicts,
         "claim_assessments": claim_assessments,
     }
+
+
+POLICY_ADVISOR_PROMPT = """You are the policy-verification specialist in an e-commerce
+dispute workflow. Review the authoritative MCP evidence and the deterministic baseline.
+The baseline primary_issue, case_status, confidence, entity resolution, shipment verdict,
+and payment verdict are immutable. Return JSON only, without reasoning or markdown.
+
+Return these optional fields:
+- secondary_issues: unique issue codes supported by evidence
+- responsible_parties: [{party_type, party_id}]
+- ranked_causes: [{cause_code, rank}]
+- resolution_actions: short concrete action codes or phrases, maximum 8
+- data_conflicts: [{field, sources, selected_source, resolution_code}]
+- claim_verdicts: [{claim_id, verdict, confidence}]
+- recommended_refund_brl and refund_lines only when the supplied policy clearly supports
+  a different remedy than the baseline
+
+Never invent IDs. Use seller/order/payment IDs only when present in affected_entities.
+Do not recommend a second refund when a full refund is already pending. For a duplicate
+charge, refund only the duplicate/excess amount, not the legitimate purchase amount.
+For no_action cases, recommend zero refund."""
+
+
+async def _llm_policy_advice(
+    *,
+    llm: Any,
+    case: dict[str, Any],
+    cache: EvidenceCache,
+    baseline: dict[str, Any],
+    entities: dict[str, Any],
+    shipment: dict[str, Any],
+    payment: dict[str, Any],
+) -> dict[str, Any]:
+    tool_names = (
+        "get_order",
+        "get_customer_history",
+        "get_order_items",
+        "get_product_context",
+        "get_shipment_summary",
+        "get_order_payments",
+        "get_payment_timeline",
+        "get_refund_timeline",
+        "get_policy",
+    )
+    evidence = {
+        tool_name: cache.data_for(tool_name)
+        for tool_name in tool_names
+        if cache.data_for(tool_name)
+    }
+    context = {
+        "case": {
+            "case_id": case.get("case_id"),
+            "claims": case.get("customer_request", {}).get("claims", []),
+            "message": case.get("customer_request", {}).get("message", ""),
+        },
+        "affected_entities": entities,
+        "shipment_analysis": shipment,
+        "payment_analysis": payment,
+        "deterministic_baseline": baseline,
+        "mcp_evidence": evidence,
+    }
+    serialized = json.dumps(context, ensure_ascii=False, separators=(",", ":"), default=str)
+    if len(serialized) > 60_000:
+        # Preserve valid JSON and the policy/baseline when an unexpected payload is large.
+        compact_evidence = {
+            name: json.dumps(value, ensure_ascii=False, default=str)[:4_000]
+            for name, value in evidence.items()
+        }
+        context["mcp_evidence"] = compact_evidence
+        serialized = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    return await llm.chat_json(
+        messages=[
+            {"role": "system", "content": POLICY_ADVISOR_PROMPT},
+            {"role": "user", "content": serialized},
+        ],
+        temperature=0.0,
+    )
+
+
+def _merge_policy_advice(
+    baseline: dict[str, Any],
+    advice: Any,
+    payment: dict[str, Any],
+    entities: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(advice, dict):
+        return baseline
+    merged = dict(baseline)
+    for field in (
+        "ranked_causes",
+        "resolution_actions",
+    ):
+        value = advice.get(field)
+        if isinstance(value, list) and value:
+            merged[field] = value
+
+    secondary = advice.get("secondary_issues")
+    if isinstance(secondary, list):
+        safe_secondary = [
+            issue
+            for issue in secondary
+            if issue in VALID_PRIMARY_ISSUES
+            and issue not in {baseline.get("primary_issue"), "insufficient_evidence"}
+        ]
+        if safe_secondary:
+            merged["secondary_issues"] = list(dict.fromkeys(safe_secondary))[:5]
+
+    # Conflicts are computed by comparing authoritative sources. Free-form model
+    # suggestions must not create source conflicts that did not occur in MCP data.
+    merged["data_conflicts"] = baseline.get("data_conflicts", [])
+
+    # Preserve the deterministic verdict for the primary claim. The advisor may
+    # refine only policy-dependent secondary claims such as requested_full_refund.
+    advised_claims = advice.get("claim_verdicts")
+    baseline_claims = baseline.get("claim_verdicts")
+    if isinstance(advised_claims, list) and isinstance(baseline_claims, list):
+        advised_by_id = {
+            str(item.get("claim_id")): item
+            for item in advised_claims
+            if isinstance(item, dict) and item.get("claim_id")
+        }
+        safe_claims: list[dict[str, Any]] = []
+        for claim in baseline_claims:
+            safe_claim = dict(claim)
+            advised = advised_by_id.get(str(claim.get("claim_id")))
+            if claim.get("topic") == "requested_full_refund" and advised:
+                verdict = advised.get("verdict")
+                confidence = _as_float(advised.get("confidence"))
+                if verdict in {"supported", "partially_supported", "unsupported"}:
+                    safe_claim["verdict"] = verdict
+                if confidence is not None and 0 <= confidence <= 1:
+                    safe_claim["confidence"] = round(confidence, 2)
+            safe_claims.append(safe_claim)
+        merged["claim_verdicts"] = safe_claims
+
+    parties = advice.get("responsible_parties")
+    if isinstance(parties, list) and parties:
+        safe_parties: list[dict[str, Any]] = []
+        seller_ids = set(entities.get("seller_ids", []))
+        baseline_types = {
+            party.get("party_type")
+            for party in baseline.get("responsible_parties", [])
+            if isinstance(party, dict)
+        }
+        for party in parties[:5]:
+            if not isinstance(party, dict) or party.get("party_type") not in VALID_PARTY_TYPES:
+                continue
+            party_type = party["party_type"]
+            if baseline_types and party_type not in baseline_types:
+                continue
+            party_id = party.get("party_id")
+            if party_type == "seller":
+                party_id = party_id if party_id in seller_ids else None
+            else:
+                party_id = None
+            safe_parties.append({"party_type": party_type, "party_id": party_id})
+        if safe_parties:
+            merged["responsible_parties"] = safe_parties
+
+    # Financial arithmetic remains deterministic for known refund flows. Only
+    # delivery/mismatch cases are policy-dependent enough to accept bounded advice.
+    issue = str(baseline.get("primary_issue", ""))
+    if issue in {"late_delivery_seller", "late_delivery_logistics", "payment_mismatch"}:
+        proposed = _as_float(advice.get("recommended_refund_brl"))
+        captured = float(payment.get("captured_total_brl", 0) or 0)
+        if proposed is not None and 0 <= proposed <= captured:
+            merged["recommended_refund_brl"] = round(proposed, 2)
+            # The normalizer creates one safe line matching the bounded total.
+            merged["refund_lines"] = []
+    return merged
 
 
 def _deterministic_policy(

@@ -9,6 +9,7 @@ from pathlib import Path
 from .cases import load_case_set
 from .config import Settings
 from .contracts import Contracts
+from .llm import LLMClient
 from .mcp_gateway import connect_gateway
 from .submission import package_submission, validate_artifacts
 from .trace import TraceWriter
@@ -45,6 +46,7 @@ async def _run(root: Path, fresh: bool = False) -> None:
     for stale in output_root.glob("*.tmp"):
         stale.unlink()
     trace = TraceWriter(trace_path, contracts)
+    llm = LLMClient(settings) if settings.enable_llm_policy else None
 
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
@@ -59,7 +61,7 @@ async def _run(root: Path, fresh: bool = False) -> None:
             print(f"[{idx:3d}/{total_cases}] Solving {case_id}...", end=" ", flush=True)
             case = case_set.cases[case_id]
             trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
-            output = await solve_case(case, gateway, trace)
+            output = await solve_case(case, gateway, trace, llm=llm)
             contracts.validate_output(output, f"outputs/{case_id}.json")
             if output.get("case_id") != case_id:
                 raise ValueError(f"solver returned a mismatched case_id for {case_id}")
@@ -82,11 +84,25 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
     commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
     run_cmd = commands.add_parser("run", help="run the implemented workflow for all cases")
-    run_cmd.add_argument("--fresh", action="store_true", help="wipe existing outputs/traces and run from scratch")
+    run_cmd.add_argument(
+        "--fresh", action="store_true", help="wipe existing outputs/traces and run from scratch"
+    )
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
     package.add_argument("--output", default="dist/submission.zip")
     return result
+
+
+def _actionable_error(exc: BaseException) -> BaseException:
+    """Unwrap async task groups so CLI failures stay concise and actionable."""
+    if isinstance(exc, BaseExceptionGroup):
+        for nested in exc.exceptions:
+            actionable = _actionable_error(nested)
+            if isinstance(actionable, (OSError, RuntimeError, ValueError)):
+                return actionable
+        if exc.exceptions:
+            return _actionable_error(exc.exceptions[0])
+    return exc
 
 
 def main() -> None:
@@ -96,8 +112,7 @@ def main() -> None:
         if args.command == "validate-inputs":
             case_set = load_case_set(root)
             print(
-                f"OK: {case_set.variant_id} / {case_set.version} / "
-                f"{len(case_set.case_ids)} cases"
+                f"OK: {case_set.variant_id} / {case_set.version} / {len(case_set.case_ids)} cases"
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
@@ -114,6 +129,10 @@ def main() -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    except BaseExceptionGroup as exc:
+        actionable = _actionable_error(exc)
+        print(f"ERROR: {actionable}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
