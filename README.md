@@ -146,6 +146,26 @@ Hoàn thiện mô tả thiết kế trong `ARCHITECTURE.md`.
 
 ## 6. Chạy và kiểm tra
 
+Runtime hiện tại dùng một worker LLM local chung cho Supervisor, Entity, Shipment,
+PaymentRefund, CustomerContext, Policy, Adjudicator và Critic. Các vai trò trả JSON
+có schema, không được sửa EvidenceRecord, DerivedFact, tiền, hay output cuối.
+`LOCAL_MODEL_BASE_URL` và `LOCAL_MODEL_ID` trong `.env` cho phép đổi backend/model.
+Mặc định là `IFM/K2-Horizon-7B-GGUF:Q4_K_M` tại `127.0.0.1:8080/v1`.
+K2 Horizon hiện cần bản llama.cpp có hỗ trợ kiến trúc K2 (fork IFM hoặc bản
+upstream đã tích hợp); kiểm tra server bằng `GET /v1/models` trước khi chạy.
+Không chạy 100 case khi server chưa sẵn: `day09 run` dừng và giữ nguyên output.
+Chỉ dùng `day09 run --allow-model-fallback` nếu chấp nhận bản deterministic-only.
+
+Trên Windows, sau khi cài được runtime K2 tương thích, cấu hình khởi động tham khảo:
+
+```powershell
+llama-server -hf IFM/K2-Horizon-7B-GGUF:Q4_K_M -c 8192 -ngl 99 --parallel 1 --host 127.0.0.1 --port 8080
+```
+
+Nếu thiếu VRAM, giảm `-ngl` để offload một phần sang RAM. Đường MCP hiện được
+serialize trên một session để tránh lỗi transport; trần thiết kế là 3 lời gọi
+đồng thời chỉ khi gateway/session chứng minh an toàn.
+
 ```bash
 day09 run
 day09 validate

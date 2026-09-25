@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
+from .agent_runtime import AgentRuntime, deterministic_route
 from .domain import collect, first, json_money, money, objects, parse_datetime, unique_strings
-from .evidence import EvidenceLedger, EvidenceRecord
+from .evidence import EvidenceLedger, EvidenceRecord, ToolRequest
 from .mcp_gateway import EvidenceGateway
 from .trace import TraceWriter
 from .verification import verify_output
@@ -149,18 +151,22 @@ async def _fetch_optional(
     ledger: EvidenceLedger, tool: str, actor: str, **arguments: Any
 ) -> EvidenceRecord | None:
     try:
-        return await ledger.fetch(tool, actor=actor, **arguments)
+        return await ledger.request(ToolRequest(ledger.case_id, actor, tool, arguments))
     except (RuntimeError, ValueError):
         return None
 
 
 async def solve_case(
-    case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
+    case: dict[str, Any],
+    gateway: EvidenceGateway,
+    trace: TraceWriter,
+    agent_runtime: AgentRuntime | None = None,
 ) -> dict[str, Any]:
-    """Run the deterministic evidence graph for one isolated case."""
+    """Run the bounded agent hierarchy around deterministic case authority."""
     case_id = case["case_id"]
     contracts = gateway.contracts
     ledger = EvidenceLedger(case_id, gateway, trace)
+    roles = await agent_runtime.plan(case) if agent_runtime else deterministic_route(case)
     candidates = unique_strings(case.get("candidate_order_ids", ()))
     claimed = case.get("customer_request", {}).get("claimed_order_id")
     ordered_candidates = unique_strings([claimed, *candidates])
@@ -201,17 +207,32 @@ async def solve_case(
     if resolved_order:
         assignments = {
             "items": ("get_order_items", "order-product", {"order_id": resolved_order}),
-            "product": ("get_product_context", "order-product", {"order_id": resolved_order}),
-            "shipment": ("get_shipment_summary", "shipment", {"order_id": resolved_order}),
             "payments": ("get_order_payments", "payment-refund", {"order_id": resolved_order}),
-            "payment_timeline": (
+            "policy": ("get_policy", "policy", {"policy_version": case["policy_version"]}),
+        }
+        if case.get("investigation_scope", {}).get("include_product_context"):
+            assignments["product"] = (
+                "get_product_context",
+                "order-product",
+                {"order_id": resolved_order},
+            )
+        if "shipment" in roles:
+            assignments["shipment"] = (
+                "get_shipment_summary",
+                "shipment",
+                {"order_id": resolved_order},
+            )
+        if "payment_refund" in roles:
+            assignments["payment_timeline"] = (
                 "get_payment_timeline",
                 "payment-refund",
                 {"order_id": resolved_order},
-            ),
-            "refunds": ("get_refund_timeline", "payment-refund", {"order_id": resolved_order}),
-            "policy": ("get_policy", "policy", {"policy_version": case["policy_version"]}),
-        }
+            )
+            assignments["refunds"] = (
+                "get_refund_timeline",
+                "payment-refund",
+                {"order_id": resolved_order},
+            )
         customer_hint = case.get("customer_unique_id_hint")
         if customer_hint and case.get("investigation_scope", {}).get("include_customer_history"):
             assignments["customer"] = (
@@ -247,9 +268,7 @@ async def solve_case(
     item_data = records["items"].data if records.get("items") else {}
     shipment_data = records["shipment"].data if records.get("shipment") else {}
     payment_data = records["payments"].data if records.get("payments") else {}
-    payment_timeline = (
-        records["payment_timeline"].data if records.get("payment_timeline") else {}
-    )
+    payment_timeline = records["payment_timeline"].data if records.get("payment_timeline") else {}
     refund_data = records["refunds"].data if records.get("refunds") else {}
     customer_data = records["customer"].data if records.get("customer") else {}
 
@@ -274,18 +293,14 @@ async def solve_case(
         claimed_topics=claimed_topics,
     )
     main_claim = next(
-        (
-            claim.get("topic")
-            for claim in claims
-            if claim.get("topic") != "requested_full_refund"
-        ),
+        (claim.get("topic") for claim in claims if claim.get("topic") != "requested_full_refund"),
         None,
     )
     primary_issue = main_claim if main_claim in claimed_topics else detected_issue
     supported = primary_issue != "insufficient_evidence"
     policy_data = records["policy"].data if records.get("policy") else {}
-    policy_rules = policy_data.get("rules", {}) if isinstance(policy_data, dict) else {}
-    policy_rule = policy_rules.get(primary_issue, {}) if isinstance(policy_rules, dict) else {}
+    policy_rules = policy_data.get("rules", {}) if isinstance(policy_data, Mapping) else {}
+    policy_rule = policy_rules.get(primary_issue, {}) if isinstance(policy_rules, Mapping) else {}
     default_action_required = (
         primary_issue not in {"valid_split_payment", "unsupported_claim"} and supported
     )
@@ -305,7 +320,9 @@ async def solve_case(
     confidence = 0.9 if supported and resolved_order else (0.45 if resolved_order else 0.1)
     policy_parties = policy_rule.get("responsible_parties", [])
     responsible: list[dict[str, str | None]] = (
-        list(policy_parties) if isinstance(policy_parties, list) else []
+        [dict(party) for party in policy_parties]
+        if isinstance(policy_parties, (list, tuple))
+        else []
     )
     if shipment_verdict == "seller_delay" and late_sellers:
         responsible = [party for party in responsible if party.get("party_type") != "seller"]
@@ -437,6 +454,78 @@ async def solve_case(
         decision_code=primary_issue.upper(),
         evidence_refs=[records["policy"].evidence_ref] if records.get("policy") else None,
     )
+    fact_sources = {
+        "ENTITY_RESOLVED": [order_record] if order_record else [],
+        "SHIPMENT_VERDICT": [records["shipment"]] if records.get("shipment") else [],
+        "PAYMENT_VERDICT": [records["payments"]] if records.get("payments") else [],
+        "POLICY_RULE": [records["policy"]] if records.get("policy") else [],
+    }
+    fact_values = {
+        "ENTITY_RESOLVED": resolved_order,
+        "SHIPMENT_VERDICT": shipment_verdict,
+        "PAYMENT_VERDICT": payment_verdict,
+        "POLICY_RULE": primary_issue,
+    }
+    for code, sources in fact_sources.items():
+        if sources:
+            ledger.derive(code, fact_values[code], sources, rule=f"deterministic:{code.lower()}")
+
+    verify_output(output, case=case, ledger=ledger, contracts=contracts)
+    if agent_runtime is not None:
+        domain_context = {
+            "entity": {
+                "resolved_order_ids": output["entity_resolution"]["resolved_order_ids"],
+                "rejected_candidates": rejected,
+            },
+            "shipment": {"verdict": shipment_verdict, "late_seller_ids": late_sellers}
+            if records.get("shipment")
+            else {},
+            "payment_refund": {
+                "verdict": payment_verdict,
+                "captured_brl": str(captured),
+                "refunded_brl": str(refunded),
+            }
+            if records.get("payments")
+            else {},
+            "customer_context": {
+                "customer_unique_id": output["customer_context"]["customer_unique_id"],
+                "related_order_ids": output["customer_context"]["related_order_ids"],
+            }
+            if records.get("customer")
+            else {},
+            "policy": {
+                "issue": primary_issue,
+                "case_status": case_status,
+                "action": output["resolution_actions"],
+            }
+            if records.get("policy")
+            else {},
+        }
+        review = await agent_runtime.review(case, ledger, roles, output, domain_context)
+        if review.candidate is not None:
+            qualitative = review.candidate["qualitative_confidence"]
+            cap = {"high": 0.9, "medium": 0.7, "low": 0.45}[qualitative]
+            if review.candidate["primary_issue"] != primary_issue:
+                cap = min(cap, 0.55)
+        else:
+            cap = 0.7
+        if review.warnings:
+            cap = min(cap, 0.55)
+        if review.fallback_roles:
+            cap = min(cap, 0.7)
+        output["assessment"]["confidence"] = min(confidence, cap)
+        for claim in output["claim_assessments"]:
+            claim["confidence"] = min(claim["confidence"], cap)
+        trace.record_metrics(
+            {
+                "case_id": case_id,
+                "agent_fallbacks": list(review.fallback_roles),
+                "critic_warning_count": len(review.warnings),
+                "model_candidate_issue": review.candidate["primary_issue"]
+                if review.candidate
+                else None,
+            }
+        )
     trace.record_metrics(ledger.metrics())
     verify_output(output, case=case, ledger=ledger, contracts=contracts)
     trace.emit(

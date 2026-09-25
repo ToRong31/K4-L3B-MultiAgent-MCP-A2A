@@ -42,7 +42,7 @@ def objects(value: Any) -> list[Mapping[str, Any]]:
         found.append(value)
         for child in value.values():
             found.extend(objects(child))
-    elif isinstance(value, list):
+    elif isinstance(value, (list, tuple)):
         for child in value:
             found.extend(objects(child))
     return found
@@ -61,7 +61,7 @@ def collect(data: Any, *keys: str) -> list[Any]:
     for item in objects(data):
         for key in keys:
             value = item.get(key)
-            if isinstance(value, list):
+            if isinstance(value, (list, tuple)):
                 values.extend(value)
             elif value is not None:
                 values.append(value)

@@ -1,11 +1,12 @@
+import subprocess
 from pathlib import Path
 
 
-def test_repository_contains_no_competition_payload() -> None:
+def test_repository_does_not_track_competition_payload() -> None:
     root = Path(__file__).resolve().parents[1]
-    assert not (root / "case-set.json").exists()
-    assert list((root / "inputs").glob("*.json")) == []
-    assert list((root / "outputs").glob("*.json")) == []
+    for path in ("case-set.json", "inputs/CASE_001.json", "outputs/CASE_001.json"):
+        result = subprocess.run(["git", "check-ignore", "--quiet", path], cwd=root, check=False)
+        assert result.returncode == 0
     forbidden = {"oracles", "reference-outputs", "private-partitions.json", "mcp-access.json"}
     assert not any(path.name in forbidden for path in root.rglob("*"))
 

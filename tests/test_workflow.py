@@ -129,11 +129,9 @@ def test_workflow_produces_verified_schema_output(tmp_path: Path) -> None:
     assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
     assert output["financial_resolution"]["recommended_refund_brl"] == 16.0
     assert output["entity_resolution"]["rejected_candidates"] == ["candidate-1"]
-    assert len(gateway.calls) == 9
+    assert len(gateway.calls) == 8
     events = [
-        json.loads(line)
-        for line in trace.path.read_text(encoding="utf-8").splitlines()
-        if line
+        json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines() if line
     ]
     event_types = {event["event_type"] for event in events}
     assert {

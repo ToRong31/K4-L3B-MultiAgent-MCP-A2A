@@ -180,5 +180,28 @@ dài vì sẽ gây KV-cache thrashing.
 - Default: MCP concurrency 1, model concurrency 1, temperature 0.1, fixed seed khi hỗ trợ.
 - Commands: `day09 validate-inputs`, `day09 mcp-tools`, `day09 run`, `day09 validate`,
   `day09 package --output dist/submission.zip`.
+
+## Bounded hierarchical runtime (v2)
+
+`AgentRuntime` dùng duy nhất một `LocalModelWorker`; khóa `asyncio.Lock` serialize
+mọi inference. `SupervisorAgent` chỉ chạy khi routing theo claim không đủ rõ;
+deterministic route không thể bị model gỡ bỏ. Năm specialist nhận context từng
+domain và trả hypothesis JSON có kiểm tra schema/ref/allow-list. `AdjudicatorAgent`
+chỉ đưa candidate issue, claim verdict và confidence định tính. `CriticAgent`
+chỉ đưa warning; cả hai không ghi final JSON.
+
+`ToolRequest` đi qua kiểm tra case/actor/tool của `EvidenceLedger`, cache theo
+case, single-flight, retry và budget trước khi gọi MCP. Raw `EvidenceRecord`
+được đóng băng đệ quy. `DerivedFact` chỉ sinh từ evidence ref có thật. Dữ liệu
+nghiệp vụ, tiền Decimal, source precedence, schema và consistency tiếp tục do
+Python quyết định. `verify_output` chạy trước và sau bước calibration; model
+không có quyền sửa amount, entity, evidence hoặc action. JSON lỗi, ref giả,
+timeout và lỗi inference được retry một lần rồi fallback theo từng agent.
+
+`day09 run` yêu cầu model local online, không tự âm thầm chuyển sang
+deterministic-only. Chỉ `--allow-model-fallback` mới cho phép điều đó. Trace
+chứa task/correlation IDs và fallback reason, metrics riêng chứa model/MCP calls.
+Gateway MCP hiện serialize do session streamable HTTP chưa được chứng minh an
+toàn ở concurrency 3; đây là giới hạn vận hành, không phải nhiều model worker.
 - Mỗi run bắt đầu với output/trace sạch; evidence không persist/reuse giữa runs.
 - Submission chỉ chứa manifest, trace và outputs; không chứa model, `.env`, inputs hoặc logs.

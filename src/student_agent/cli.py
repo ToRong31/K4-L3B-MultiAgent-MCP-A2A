@@ -7,10 +7,12 @@ import sys
 import time
 from pathlib import Path
 
+from .agent_runtime import AgentRuntime
 from .cases import load_case_set
 from .config import Settings
 from .contracts import Contracts
 from .mcp_gateway import connect_gateway
+from .model_worker import LocalModelWorker, ModelConfig
 from .submission import package_submission, validate_artifacts
 from .trace import TraceWriter
 from .workflow import solve_case
@@ -28,7 +30,9 @@ async def _show_tools(root: Path) -> None:
             print(f"{tool_name}: {json.dumps(specification, ensure_ascii=False)}")
 
 
-async def _run(root: Path, *, resume: bool = False) -> None:
+async def _run(
+    root: Path, *, resume: bool = False, allow_model_fallback: bool = False
+) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
@@ -36,6 +40,33 @@ async def _run(root: Path, *, resume: bool = False) -> None:
     trace_path = root / "traces" / "trace.jsonl"
     metrics_path = root / "traces" / "run-metrics.jsonl"
     summary_path = root / "traces" / "run-summary.json"
+    model_worker = LocalModelWorker(
+        ModelConfig(base_url=settings.model_base_url, model=settings.model_id)
+    )
+    model_ready = await model_worker.ready()
+    if model_ready:
+        try:
+            smoke_test = await model_worker.complete(
+                system="Preflight test. Return only JSON.",
+                payload={"preflight": "check"},
+                schema={
+                    "type": "object",
+                    "properties": {"status": {"type": "string"}},
+                    "required": ["status"],
+                },
+                max_tokens=64,
+            )
+            if not isinstance(smoke_test, dict):
+                model_ready = False
+        except Exception as exc:
+            if not allow_model_fallback:
+                raise RuntimeError(f"local model preflight completion failed: {exc}") from exc
+            model_ready = False
+    if not model_ready and not allow_model_fallback:
+        raise RuntimeError(
+            "local model is unavailable; existing outputs were preserved. "
+            "Start the model server or pass --allow-model-fallback explicitly"
+        )
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     if not resume:
@@ -47,6 +78,9 @@ async def _run(root: Path, *, resume: bool = False) -> None:
     trace = TraceWriter(trace_path, contracts, metrics_path)
     failures: list[dict[str, str]] = []
     started = time.monotonic()
+    agent_runtime = AgentRuntime(model_worker, trace) if model_ready else None
+    if not model_ready:
+        print("WARN local model unavailable; deterministic fallback active", file=sys.stderr)
 
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
@@ -60,7 +94,7 @@ async def _run(root: Path, *, resume: bool = False) -> None:
             case_started = time.monotonic()
             try:
                 trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
-                output = await solve_case(case, gateway, trace)
+                output = await solve_case(case, gateway, trace, agent_runtime=agent_runtime)
                 contracts.validate_output(output, f"outputs/{case_id}.json")
                 if output.get("case_id") != case_id:
                     raise ValueError(f"solver returned a mismatched case_id for {case_id}")
@@ -84,6 +118,8 @@ async def _run(root: Path, *, resume: bool = False) -> None:
         "success_count": completed,
         "failure_count": len(failures),
         "elapsed_seconds": round(time.monotonic() - started, 3),
+        "model_ready": model_ready,
+        "model_invocations": model_worker.invocations,
         "failures": failures,
     }
     summary_path.write_text(
@@ -103,6 +139,10 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--resume", action="store_true", help="keep valid existing outputs and run missing cases"
     )
+    run.add_argument(
+        "--allow-model-fallback", action="store_true",
+        help="permit a deterministic-only run if the local LLM server is unavailable",
+    )
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
     package.add_argument("--output", default="dist/submission.zip")
@@ -116,13 +156,14 @@ def main() -> None:
         if args.command == "validate-inputs":
             case_set = load_case_set(root)
             print(
-                f"OK: {case_set.variant_id} / {case_set.version} / "
-                f"{len(case_set.case_ids)} cases"
+                f"OK: {case_set.variant_id} / {case_set.version} / {len(case_set.case_ids)} cases"
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
         elif args.command == "run":
-            asyncio.run(_run(root, resume=args.resume))
+            asyncio.run(
+                _run(root, resume=args.resume, allow_model_fallback=args.allow_model_fallback)
+            )
         elif args.command == "validate":
             case_set = load_case_set(root)
             contracts = Contracts(root / "contracts" / "schemas")
