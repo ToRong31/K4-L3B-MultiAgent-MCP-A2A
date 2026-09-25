@@ -266,13 +266,22 @@ async def solve_case(
     order_status = str(first(order_data, "order_status", "status") or "")
     claims = case.get("customer_request", {}).get("claims", ())
     claimed_topics = {claim["topic"] for claim in claims if isinstance(claim, dict)}
-    primary_issue = _primary_issue(
+    detected_issue = _primary_issue(
         order_status=order_status,
         shipment_verdict=shipment_verdict,
         payment_verdict=payment_verdict,
         payment_rows=payment_rows,
         claimed_topics=claimed_topics,
     )
+    main_claim = next(
+        (
+            claim.get("topic")
+            for claim in claims
+            if claim.get("topic") != "requested_full_refund"
+        ),
+        None,
+    )
+    primary_issue = main_claim if main_claim in claimed_topics else detected_issue
     supported = primary_issue != "insufficient_evidence"
     policy_data = records["policy"].data if records.get("policy") else {}
     policy_rules = policy_data.get("rules", {}) if isinstance(policy_data, dict) else {}
@@ -299,9 +308,8 @@ async def solve_case(
         list(policy_parties) if isinstance(policy_parties, list) else []
     )
     if shipment_verdict == "seller_delay" and late_sellers:
-        responsible = [
-            {"party_type": "seller", "party_id": value} for value in late_sellers
-        ]
+        responsible = [party for party in responsible if party.get("party_type") != "seller"]
+        responsible.extend({"party_type": "seller", "party_id": value} for value in late_sellers)
     elif not responsible and shipment_verdict == "seller_delay":
         responsible.extend({"party_type": "seller", "party_id": value} for value in late_sellers)
     elif not responsible and shipment_verdict in {"logistics_delay", "lost", "returned"}:
@@ -345,7 +353,11 @@ async def solve_case(
         "case_id": case_id,
         "assessment": {
             "primary_issue": primary_issue,
-            "secondary_issues": [],
+            "secondary_issues": (
+                [detected_issue]
+                if detected_issue not in {primary_issue, "insufficient_evidence"}
+                else []
+            ),
             "case_status": case_status,
             "confidence": confidence,
         },
@@ -380,7 +392,14 @@ async def solve_case(
             "refundable_total_brl": json_money(refundable),
         },
         "root_cause_analysis": {
-            "ranked_causes": [{"cause_code": primary_issue.upper(), "rank": 1}],
+            "ranked_causes": [
+                {"cause_code": primary_issue.upper(), "rank": 1},
+                *(
+                    [{"cause_code": detected_issue.upper(), "rank": 2}]
+                    if detected_issue not in {primary_issue, "insufficient_evidence"}
+                    else []
+                ),
+            ],
             "responsible_parties": responsible,
         },
         "evidence_refs": ledger.consumed_refs,

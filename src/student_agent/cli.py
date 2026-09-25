@@ -28,7 +28,7 @@ async def _show_tools(root: Path) -> None:
             print(f"{tool_name}: {json.dumps(specification, ensure_ascii=False)}")
 
 
-async def _run(root: Path) -> None:
+async def _run(root: Path, *, resume: bool = False) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
@@ -38,11 +38,12 @@ async def _run(root: Path) -> None:
     summary_path = root / "traces" / "run-summary.json"
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in output_root.glob("*.json"):
-        stale.unlink()
-    trace_path.unlink(missing_ok=True)
-    metrics_path.unlink(missing_ok=True)
-    summary_path.unlink(missing_ok=True)
+    if not resume:
+        for stale in output_root.glob("*.json"):
+            stale.unlink()
+        trace_path.unlink(missing_ok=True)
+        metrics_path.unlink(missing_ok=True)
+        summary_path.unlink(missing_ok=True)
     trace = TraceWriter(trace_path, contracts, metrics_path)
     failures: list[dict[str, str]] = []
     started = time.monotonic()
@@ -52,6 +53,9 @@ async def _run(root: Path) -> None:
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
         for case_id in case_set.case_ids:
+            if resume and (output_root / f"{case_id}.json").is_file():
+                print(f"SKIP {case_id} existing output", flush=True)
+                continue
             case = case_set.cases[case_id]
             case_started = time.monotonic()
             try:
@@ -74,9 +78,10 @@ async def _run(root: Path) -> None:
                 )
                 print(f"FAIL {case_id}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
+    completed = len(list(output_root.glob("*.json")))
     summary = {
         "case_count": len(case_set.case_ids),
-        "success_count": len(case_set.case_ids) - len(failures),
+        "success_count": completed,
         "failure_count": len(failures),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "failures": failures,
@@ -94,7 +99,10 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
     commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
-    commands.add_parser("run", help="run the implemented workflow for all cases")
+    run = commands.add_parser("run", help="run the implemented workflow for all cases")
+    run.add_argument(
+        "--resume", action="store_true", help="keep valid existing outputs and run missing cases"
+    )
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
     package.add_argument("--output", default="dist/submission.zip")
@@ -114,7 +122,7 @@ def main() -> None:
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
         elif args.command == "run":
-            asyncio.run(_run(root))
+            asyncio.run(_run(root, resume=args.resume))
         elif args.command == "validate":
             case_set = load_case_set(root)
             contracts = Contracts(root / "contracts" / "schemas")
