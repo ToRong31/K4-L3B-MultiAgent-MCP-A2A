@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from student_agent.contracts import Contracts
+from student_agent.mcp_gateway import MCPToolError
 from student_agent.trace import TraceWriter
 from student_agent.verification import VerificationError, verify_output
 from student_agent.workflow import solve_case
@@ -153,3 +154,25 @@ def test_workflow_produces_verified_schema_output(tmp_path: Path) -> None:
             ledger=LedgerView(),  # type: ignore[arg-type]
             contracts=contracts,
         )
+
+
+def test_mcp_infrastructure_error_cannot_become_empty_evidence_output(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    contracts = Contracts(root / "contracts" / "schemas")
+    trace = TraceWriter(tmp_path / "trace.jsonl", contracts)
+
+    class BrokenGateway(FakeGateway):
+        async def call(self, tool_name: str, *, case_id: str, **arguments: Any) -> dict[str, Any]:
+            raise MCPToolError("MCP tool get_order failed: Error executing tool", retryable=False)
+
+    case = {
+        "case_id": "CASE_001",
+        "customer_request": {
+            "claimed_order_id": "order-1",
+            "claims": [{"claim_id": "claim-1", "topic": "late_delivery_logistics"}],
+        },
+        "candidate_order_ids": ["order-1"],
+        "policy_version": "EC_POLICY_V2",
+    }
+    with pytest.raises(MCPToolError, match="Error executing tool"):
+        asyncio.run(solve_case(case, BrokenGateway(contracts), trace))  # type: ignore[arg-type]

@@ -56,7 +56,11 @@ def validate_artifacts(
         contracts.validate_output(output, f"outputs/{case_id}.json")
         if output.get("case_id") != case_id:
             raise ValueError(f"outputs/{case_id}.json has a mismatched case_id")
+        if output["entity_resolution"]["status"] == "resolved" and not output["evidence_refs"]:
+            raise ValueError(f"outputs/{case_id}.json resolves an entity without evidence")
         outputs[case_id] = output
+    if not any(output["evidence_refs"] for output in outputs.values()):
+        raise ValueError("all outputs lack MCP evidence; refusing a zero-evidence submission")
 
     trace_path = root / "traces" / "trace.jsonl"
     try:
