@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ...core.agent_messages import EVIDENCE_REF, Finding, WorkOrder
@@ -174,6 +175,8 @@ def analyze_policy(
             )
         )
         questions.append("Conflict requires issue recomputation or lacks complete source metadata")
+        # Do not emit a second, contradictory assessment from a matching rule.
+        return facts, questions
     if not applicable:
         assessment = {
             "primary_issue": "insufficient_evidence",
@@ -359,6 +362,43 @@ class PolicyAgent(Specialist):
                 response.get("data"), work.input.get("findings"), response["evidence_ref"],
                 work.input.get("case"),
             )
+            assessment = next((item for item in facts if item.get("kind") == "assessment"), None)
+            if self.llm is not None and assessment is not None:
+                model_response = await self.llm.complete_with_memory(
+                    self.memory,
+                    case_id=work.case_id,
+                    agent_id=self.name,
+                    turn_id=work.task_id,
+                    system_prompt=(
+                        'Review the evidence-backed assessment. Return only JSON in the form '
+                        '{"confidence": 0.0}. Confidence must be between 0 and 1. '
+                        'Assess the existing primary_issue and case_status; do not invent evidence.'
+                    ),
+                    user_prompt=json.dumps(
+                        {
+                            "assessment": assessment["data"],
+                            "customer_request": (work.input.get("case") or {}).get("customer_request"),
+                            "findings": work.input.get("findings"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    max_tokens=80,
+                )
+                start, end = model_response.find("{"), model_response.rfind("}")
+                if start < 0 or end < start:
+                    raise ValueError("model response did not contain a JSON object")
+                model_confidence = json.loads(model_response[start : end + 1])["confidence"]
+                if not isinstance(model_confidence, (int, float)) or not 0 <= model_confidence <= 1:
+                    raise ValueError("model confidence must be between 0 and 1")
+                original = assessment["data"]["confidence"]
+                revised = (original + model_confidence) / 2
+                if assessment["data"]["case_status"] == "needs_investigation":
+                    revised = min(revised, 0.8)
+                assessment["data"]["confidence"] = round(revised, 2)
+                self.memory.append(
+                    work.case_id, self.name, work.task_id, "llm_review",
+                    {"provider": self.llm.provider_name, "model": self.llm.model},
+                )
             return finding(work, self.name, "completed", facts, questions)
         except Exception as exc:
             return finding(work, self.name, "failed", [], [f"Policy MCP error: {exc}"])

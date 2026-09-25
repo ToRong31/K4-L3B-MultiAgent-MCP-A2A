@@ -129,8 +129,12 @@ def analyze_payment(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Deduplicate by transaction ID, never by amount alone."""
     claim_topics = claim_topics or set()
-    timeline_payments = records(timeline, "payments")
-    payment_rows = timeline_payments or records(payments, "payments", "captures")
+    embedded_payments = timeline.get("payments") if isinstance(timeline, dict) else None
+    payment_rows = (
+        records(embedded_payments)
+        if isinstance(embedded_payments, list)
+        else records(payments, "payments", "captures")
+    )
     signature_counts: dict[tuple[str, str, Decimal], int] = {}
     signatures_by_amount: dict[Decimal, set[tuple[str, str]]] = {}
     for row in payment_rows:
@@ -290,9 +294,19 @@ class PaymentAgent(Specialist):
         questions = []
         try:
             for order_id in candidates:
-                payment = await fetch(self, work, "get_order_payments", order_id=order_id)
                 timeline = await fetch(self, work, "get_payment_timeline", order_id=order_id)
-                refs = [payment["evidence_ref"], timeline["evidence_ref"]]
+                timeline_data = timeline.get("data")
+                refs = [timeline["evidence_ref"]]
+                # The authoritative timeline already embeds the payment ledger.
+                # Fetch the separate ledger only for servers that omit this field.
+                if isinstance(timeline_data, dict) and isinstance(
+                    timeline_data.get("payments"), list
+                ):
+                    payment_data = timeline_data["payments"]
+                else:
+                    payment = await fetch(self, work, "get_order_payments", order_id=order_id)
+                    payment_data = payment.get("data")
+                    refs.append(payment["evidence_ref"])
                 snapshot = work.input.get("snapshot")
                 if isinstance(snapshot, dict) and snapshot.get("order_id") == order_id:
                     refs.append(snapshot["evidence_ref"])
@@ -312,7 +326,7 @@ class PaymentAgent(Specialist):
                 if refund is not None:
                     refs.append(refund["evidence_ref"])
                 analysis, detail = analyze_payment(
-                    payment.get("data"), timeline.get("data"),
+                    payment_data, timeline_data,
                     refund.get("data") if refund is not None else None,
                     snapshot,
                     claim_topics,

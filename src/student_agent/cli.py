@@ -14,6 +14,7 @@ from .mcp_gateway import connect_gateway
 from .submission import package_submission, validate_artifacts
 from .trace import TraceWriter
 from .workflow import solve_case
+from .workspace import prepare_workspace
 
 
 def _root(value: str) -> Path:
@@ -82,6 +83,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
     commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
+    commands.add_parser("prepare-workspace", help="prepare server session and print workspace JSON")
     commands.add_parser("run", help="run the implemented workflow for all cases")
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
@@ -101,6 +103,8 @@ def main() -> None:
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
+        elif args.command == "prepare-workspace":
+            print(json.dumps(prepare_workspace(Settings.load(root), load_case_set(root))))
         elif args.command == "run":
             asyncio.run(_run(root))
         elif args.command == "validate":

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from student_agent.agents.order_item.agent import analyze_order
 from student_agent.agents.payment.agent import PaymentAgent, analyze_payment
 from student_agent.agents.shipment.agent import analyze_shipment
@@ -201,3 +203,46 @@ def test_tool_error_is_failed() -> None:
     work = WorkOrder("CASE_001", "payment", "task1", {"case": {"candidate_order_ids": ["o1"]}})
     result = asyncio.run(agent.investigate(work))
     assert result.status == "failed"
+
+
+@pytest.mark.parametrize("embedded", [True, False])
+def test_payment_uses_embedded_ledger_with_legacy_fallback(embedded: bool) -> None:
+    ledger = [{"payment_type": "credit_card", "payment_sequential": "1", "payment_value": "30.00"}]
+    timeline = {"events": [{"event_id": "c1", "amount_brl": "30.00", "type": "capture"}]}
+    if embedded:
+        timeline["payments"] = ledger
+
+    class Evidence:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, _agent, tool, **_kwargs):
+            self.calls.append(tool)
+            return {
+                "evidence_ref": "ev_" + ("t" if tool == "get_payment_timeline" else "p") * 24,
+                "data": timeline if tool == "get_payment_timeline" else ledger,
+            }
+
+    evidence = Evidence()
+    work = WorkOrder("CASE_001", "payment", "task1", {"case": {"candidate_order_ids": ["o1"]}})
+    result = asyncio.run(PaymentAgent(None, evidence=evidence).investigate(work))
+    assert result.status == "completed"
+    assert evidence.calls == (
+        ["get_payment_timeline"] if embedded else ["get_payment_timeline", "get_order_payments"]
+    )
+    assert next(f["data"] for f in result.facts if f["kind"] == "payment_analysis")[
+        "captured_total_brl"
+    ] == 30
+    assert len(result.evidence_refs) == (1 if embedded else 2)
+
+
+def test_payment_parser_uses_ledger_when_timeline_omits_payments() -> None:
+    snapshot = {"purchase_at": "2018-01-01T09:00:00Z", "opened_at": "2018-01-02T09:00:00Z"}
+    ledger = [{"payment_type": "credit_card", "payment_sequential": "1", "payment_value": "30.00"}]
+    timeline = {
+        "events": [
+            {"event_at": "2018-01-01T10:00:00Z", "amount_brl": "30.00", "type": "capture"}
+        ]
+    }
+    _, detail = analyze_payment(ledger, timeline, [], snapshot)
+    assert detail["payment_references"] == ["credit_card:1"]

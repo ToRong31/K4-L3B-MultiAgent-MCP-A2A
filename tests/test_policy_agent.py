@@ -88,6 +88,21 @@ def test_unresolved_source_conflict_stays_visible() -> None:
     assert questions
 
 
+def test_conflict_emits_one_assessment_even_with_matching_policy() -> None:
+    policy = {"rules": {"refund_failed": {"case_status": "action_required", "refund_brl": 52}}}
+    facts, _ = analyze_policy(
+        policy,
+        [
+            _finding("shipment_analysis", {"verdict": "conflicting"}),
+            _finding("payment_analysis", {"verdict": "refund_failed"}),
+        ],
+        REF,
+    )
+    assessments = [f["data"] for f in facts if f["kind"] == "assessment"]
+    assert len(assessments) == 1
+    assert assessments[0]["primary_issue"] == "insufficient_evidence"
+
+
 def test_policy_emits_public_data_conflict_with_evidence() -> None:
     source_ref = "ev_bbbbbbbbbbbbbbbbbbbb"
     item = {
