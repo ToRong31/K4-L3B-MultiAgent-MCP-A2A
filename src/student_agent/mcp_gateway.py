@@ -17,9 +17,24 @@ class EvidenceGateway:
         self._session = session
         self._contracts = contracts
 
+    @property
+    def contracts(self) -> Contracts:
+        return self._contracts
+
     async def list_tools(self) -> list[str]:
         response = await self._session.list_tools()
         return sorted(tool.name for tool in response.tools)
+
+    async def describe_tools(self) -> dict[str, dict[str, Any]]:
+        """Return discovered input schemas keyed by tool name."""
+        response = await self._session.list_tools()
+        return {
+            tool.name: {
+                "description": tool.description or "",
+                "input_schema": tool.input_schema,
+            }
+            for tool in sorted(response.tools, key=lambda item: item.name)
+        }
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}

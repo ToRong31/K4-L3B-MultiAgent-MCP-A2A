@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 from .cases import load_case_set
@@ -23,8 +24,8 @@ async def _show_tools(root: Path) -> None:
     settings = Settings.load(root)
     contracts = Contracts(root / "contracts" / "schemas")
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
-        for tool in await gateway.list_tools():
-            print(tool)
+        for tool_name, specification in (await gateway.describe_tools()).items():
+            print(f"{tool_name}: {json.dumps(specification, ensure_ascii=False)}")
 
 
 async def _run(root: Path) -> None:
@@ -33,12 +34,18 @@ async def _run(root: Path) -> None:
     contracts = Contracts(root / "contracts" / "schemas")
     output_root = root / "outputs"
     trace_path = root / "traces" / "trace.jsonl"
+    metrics_path = root / "traces" / "run-metrics.jsonl"
+    summary_path = root / "traces" / "run-summary.json"
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     for stale in output_root.glob("*.json"):
         stale.unlink()
     trace_path.unlink(missing_ok=True)
-    trace = TraceWriter(trace_path, contracts)
+    metrics_path.unlink(missing_ok=True)
+    summary_path.unlink(missing_ok=True)
+    trace = TraceWriter(trace_path, contracts, metrics_path)
+    failures: list[dict[str, str]] = []
+    started = time.monotonic()
 
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
@@ -46,18 +53,39 @@ async def _run(root: Path) -> None:
             raise RuntimeError("MCP Gateway returned no tools")
         for case_id in case_set.case_ids:
             case = case_set.cases[case_id]
-            trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
-            output = await solve_case(case, gateway, trace)
-            contracts.validate_output(output, f"outputs/{case_id}.json")
-            if output.get("case_id") != case_id:
-                raise ValueError(f"solver returned a mismatched case_id for {case_id}")
-            target = output_root / f"{case_id}.json"
-            temporary = target.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
-            temporary.replace(target)
-            trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+            case_started = time.monotonic()
+            try:
+                trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
+                output = await solve_case(case, gateway, trace)
+                contracts.validate_output(output, f"outputs/{case_id}.json")
+                if output.get("case_id") != case_id:
+                    raise ValueError(f"solver returned a mismatched case_id for {case_id}")
+                target = output_root / f"{case_id}.json"
+                temporary = target.with_suffix(".json.tmp")
+                temporary.write_text(
+                    json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+                temporary.replace(target)
+                trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+                print(f"OK {case_id} {time.monotonic() - case_started:.3f}s", flush=True)
+            except Exception as exc:  # Isolate a failed case and preserve the rest of the batch.
+                failures.append(
+                    {"case_id": case_id, "error_type": type(exc).__name__, "message": str(exc)}
+                )
+                print(f"FAIL {case_id}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    summary = {
+        "case_count": len(case_set.case_ids),
+        "success_count": len(case_set.case_ids) - len(failures),
+        "failure_count": len(failures),
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "failures": failures,
+    }
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    if failures:
+        raise RuntimeError(f"{len(failures)} cases failed; see {summary_path}")
 
 
 def parser() -> argparse.ArgumentParser:
