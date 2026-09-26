@@ -34,7 +34,7 @@ Input → Entity Resolver → Coordinator dispatch
 | order-agent | resolved_order_ids | Thu thập item, seller ID và product context | get_order_items, get_product_context | affected_entities, order/product data |
 | shipment-agent | order data | Phân tích timeline giao hàng, xác định delay | get_shipment_summary | shipment_analysis |
 | payment-agent | order data + claim topic | Đối soát payment; timeline payment thay base payment call khi issue liên quan | get_order_payments hoặc get_payment_timeline; conditional get_refund_timeline | payment_analysis |
-| policy-agent | normalized + raw evidence | Deterministic baseline; optional GPT policy advice cho causes/actions/conflicts, không được override core facts | get_policy | assessment, root_cause_analysis, financial_resolution, resolution_actions |
+| policy-agent | normalized + raw evidence | Deterministic baseline với cause taxonomy; optional GPT policy advice cho causes/actions, không override core facts; claim refund được reconcile theo remedy cuối | get_policy | assessment, root_cause_analysis, financial_resolution, resolution_actions |
 | verifier-agent | full output draft | Kiểm tra cross-field consistency, calibration confidence | none | Validated final output |
 
 Áp dụng least privilege; tool discovery không đồng nghĩa mọi actor đều được gọi mọi tool.
@@ -67,10 +67,10 @@ Input → Entity Resolver → Coordinator dispatch
 | Source conflict | 0 | Record in data_conflicts; shipment summary wins delivery fields | policy_decided conflict_count |
 
 Cache per-case: lưu kết quả MCP theo (tool_name, case_id, key_args) để tránh gọi trùng.
-Query budget target: 7 calls/case, kể cả payment lifecycle vì `get_payment_timeline` đã chứa
+Query budget target: 7 calls/case, kể cả payment lifecycle vì get_payment_timeline đã chứa
 base payment rows; 8 calls cho refund lifecycle cần cả payment và refund state. Gateway cũ thiếu
-payment rows trong timeline được fallback sang `get_order_payments` để ưu tiên tính đúng.
-`get_sellers` không được gọi vì seller IDs đã có trong `get_order_items`; timeline tools không
+payment rows trong timeline được fallback sang get_order_payments để ưu tiên tính đúng.
+get_sellers không được gọi vì seller IDs đã có trong get_order_items; timeline tools không
 được gọi dàn trải.
 
 ## 6. Verification invariants

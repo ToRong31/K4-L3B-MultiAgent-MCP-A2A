@@ -61,7 +61,7 @@ class FakePolicyAdvisor:
                 },
                 {
                     "claim_id": "claim-refund",
-                    "verdict": "partially_supported",
+                    "verdict": "unsupported",
                     "confidence": 0.82,
                 },
             ],
